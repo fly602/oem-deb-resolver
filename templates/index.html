@@ -43,12 +43,15 @@
   <form method="post" action="/preview" id="mainForm">
     <label>Base Package List（支持本地路径或在线 URL）</label>
     <div class="base-list-group">
-      <input type="text" name="base_list" id="baseListInput" value="{{ base_list }}" placeholder="输入或选择 Base Package List 路径..." list="base-list-datalist">
-      <datalist id="base-list-datalist">
+      <input type="text" name="base_list" id="baseListInput" value="{{ base_list }}" placeholder="当前选中的 Base Package List 路径...">
+    </div>
+    <div class="base-list-group">
+      <select id="baseListSelect" title="选择历史列表">
+        <option value="">-- 选择历史 --</option>
         {% for item in base_lists %}
-        <option value="{{ item }}">
+        <option value="{{ item }}">{{ item }}</option>
         {% endfor %}
-      </datalist>
+      </select>
       <button type="button" class="btn-sm btn-reset" id="btnResetBase" title="重置 Base Package List 配置">↺ 重置</button>
     </div>
     <p class="hint">当前基础镜像包列表共有 {{ base_count }} 个包。支持本地路径或 HTTP URL。</p>
@@ -110,21 +113,46 @@ deb [trusted=yes] https://aptly.uniontech.com/pkg/commercial-snipe-2500u1/releas
   </section>
 
   <script>
-    // 选择/新增 base list 时，将其置顶（去重 + 移到第一位）
     var baseListInput = document.getElementById('baseListInput');
-    baseListInput.addEventListener('change', function() {
-      var val = this.value.trim();
-      if (!val) return;
-      fetch('/add-base-list', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: 'path=' + encodeURIComponent(val)
-      });
+    var baseListSelect = document.getElementById('baseListSelect');
+
+    // 页面加载时：
+    // - 若输入框有值，同步选中下拉框对应项
+    // - 若输入框为空但有历史配置，默认选中第一条
+    (function() {
+      var val = baseListInput.value.trim();
+      if (val) {
+        // 输入框已有值 → 同步下拉框
+        for (var i = 0; i < baseListSelect.options.length; i++) {
+          if (baseListSelect.options[i].value === val) {
+            baseListSelect.selectedIndex = i;
+            return;
+          }
+        }
+      } else if (baseListSelect.options.length > 1) {
+        // 输入框为空但有历史 → 默认选第一条
+        baseListSelect.selectedIndex = 1;
+        baseListInput.value = baseListSelect.value;
+      }
+    })();
+
+    // 从下拉框选择 → 填入输入框，并保存置顶
+    baseListSelect.addEventListener('change', function() {
+      var val = this.value;
+      if (val) {
+        baseListInput.value = val;
+        fetch('/add-base-list', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: 'path=' + encodeURIComponent(val)
+        });
+      }
     });
 
     // 清空 base list
     document.getElementById('btnResetBase').addEventListener('click', function() {
       baseListInput.value = '';
+      baseListSelect.selectedIndex = 0;
       fetch('/reset-base-list', {method: 'POST'});
     });
 
