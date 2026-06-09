@@ -6,6 +6,21 @@ set -e
 REPO_URL="${INSTALL_URL:-https://github.com/fly602/oem-deb-resolver.git}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.cache/oem-deb-resolver}"
 
+# ── 检查并安装依赖 ──
+check_and_install() {
+    local cmd="$1"
+    local pkg="$2"
+    if ! command -v "$cmd" &> /dev/null; then
+        echo "未找到 $cmd，正在安装..."
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq "$pkg"
+    fi
+}
+
+echo "==> 检查系统依赖..."
+check_and_install git git
+check_and_install python3 python3
+
 echo "==> 克隆仓库到 $INSTALL_DIR ..."
 if [ -d "$INSTALL_DIR" ]; then
     echo "目录已存在，进入并更新..."
@@ -16,12 +31,6 @@ else
 fi
 
 cd "$INSTALL_DIR"
-
-echo "==> 检查 Python 环境..."
-if ! command -v python3 &> /dev/null; then
-    echo "错误: 未找到 python3，请先安装 Python 3"
-    exit 1
-fi
 
 echo "==> 安装 Python 依赖..."
 python3 -m pip install --break-system-packages -q -r requirements.txt
