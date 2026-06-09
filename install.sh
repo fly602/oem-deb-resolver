@@ -20,6 +20,7 @@ check_and_install() {
 echo "==> 检查系统依赖..."
 check_and_install git git
 check_and_install python3 python3
+check_and_install pip3 python3-pip
 
 echo "==> 克隆仓库到 $INSTALL_DIR ..."
 if [ -d "$INSTALL_DIR" ]; then
@@ -33,7 +34,7 @@ fi
 cd "$INSTALL_DIR"
 
 echo "==> 安装 Python 依赖..."
-python3 -m pip install --break-system-packages -q -r requirements.txt
+pip3 install --break-system-packages -q -r requirements.txt
 
 echo "==> 赋予脚本可执行权限..."
 chmod +x web_oem_download.py install.sh run-oem-web.sh
