@@ -1,11 +1,20 @@
 #!/bin/bash
-# oem-deb-resolver 安装脚本
+# oem-deb-resolver 一键安装脚本
+# 用法: curl -fsSL https://raw.githubusercontent.com/fly602/oem-deb-resolver/main/install.sh | bash
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_URL="${INSTALL_URL:-https://github.com/fly602/oem-deb-resolver.git}"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/oem-deb-resolver}"
 
-echo "==> oem-deb-resolver 安装"
-echo ""
+echo "==> 克隆仓库到 $INSTALL_DIR ..."
+if [ -d "$INSTALL_DIR" ]; then
+    echo "目录已存在，进入并更新..."
+    cd "$INSTALL_DIR" && git pull
+else
+    git clone --depth=1 "$REPO_URL" "$INSTALL_DIR"
+fi
+
+cd "$INSTALL_DIR"
 
 echo "==> 检查 Python 环境..."
 if ! command -v python3 &> /dev/null; then
@@ -14,14 +23,15 @@ if ! command -v python3 &> /dev/null; then
 fi
 
 echo "==> 安装 Python 依赖..."
-python3 -m pip install --break-system-packages -q -r "$SCRIPT_DIR/requirements.txt"
+pip install --break-system-packages -q -r requirements.txt
 
 echo "==> 赋予脚本可执行权限..."
-chmod +x "$SCRIPT_DIR/web_oem_download.py"
+chmod +x web_oem_download.py install.sh run-oem-web.sh
 
 echo ""
-echo "安装完成！启动方式："
-echo "  cd $SCRIPT_DIR"
+echo "安装完成！"
+echo "启动方式："
+echo "  cd $INSTALL_DIR"
 echo "  python3 web_oem_download.py"
 echo ""
 echo "服务地址: http://127.0.0.1:51234"
