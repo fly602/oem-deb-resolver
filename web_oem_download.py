@@ -47,6 +47,10 @@ from patch_resolver import (
 WORKDIR = Path(__file__).resolve().parent
 CONFIG_DIR = WORKDIR / "config"
 CACHE_DIR = WORKDIR / "cache"
+
+# 确保必要目录存在
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 PATCH_LIST = CONFIG_DIR / "patch-packages.txt"
 DEFAULT_OUTPUT_DIR = CACHE_DIR / "download"
 SOURCES_FILE = CONFIG_DIR / "oem-patch-sources.list"
@@ -94,7 +98,7 @@ def save_base_lists(paths: list[str]):
 def load_base_list() -> str:
     """Load saved base_list path."""
     if not BASE_LIST_FILE.exists():
-        return str(CONFIG_DIR / "packages-full-x86_64.txt")
+        return ""
     return BASE_LIST_FILE.read_text(encoding="utf-8").strip()
 
 
