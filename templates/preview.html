@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>预览解析结果</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 24px; max-width: 1100px; margin: auto; }
+    h1, h2 { margin-top: 24px; }
+    h2 { border-bottom: 2px solid #2196F3; padding-bottom: 4px; }
+    .button-row { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 20px; align-items: center; }
+    button, a.button {
+      padding: 12px 22px; font-size: 1em; text-decoration: none;
+      border: 1px solid #888; background: #f7f7f7; color: #222; border-radius: 4px; cursor: pointer;
+    }
+    button:hover, a.button:hover { background: #eee; }
+    button.download-btn { background: #4CAF50; color: #fff; border-color: #388E3C; font-size: 1.05em; }
+    button.download-btn:hover:not(:disabled) { background: #388E3C; }
+    button.download-btn:disabled { background: #9e9e9e; border-color: #757575; cursor: not-allowed; }
+    pre { white-space: pre-wrap; background: #f9f9f9; padding: 14px; border: 1px solid #ddd; overflow-x: auto; max-height: 400px; font-size: 0.9em; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { padding: 8px 10px; border: 1px solid #ddd; text-align: left; }
+    th { background: #f0f0f0; }
+    .error-box { background: #ffebee; border: 1px solid #f44336; padding: 12px 16px; border-radius: 4px; margin-top: 12px; }
+    .warn-box { background: #fff3cd; border: 1px solid #ffc107; padding: 12px 16px; border-radius: 4px; margin-top: 12px; }
+    .stat-row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+    .stat-chip { background: #e9ecef; padding: 5px 12px; border-radius: 16px; font-size: 0.9em; }
+    .stat-chip.error { background: #ffebee; color: #c62828; }
+    .stat-chip.warn { background: #fff3cd; color: #856404; }
+    .tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.85em; margin-right: 4px; }
+    .tag-patch { background: #e3f2fd; color: #1565C0; }
+    .tag-related { background: #f3e5f5; color: #7B1FA2; }
+    .tag-dep { background: #fff3e0; color: #e65100; }
+    .version { color: #555; font-size: 0.88em; }
+    .base-hint { color: #888; font-size: 0.85em; }
+  </style>
+</head>
+<body>
+  <h1>预览解析结果</h1>
+  <p>配置已自动保存。{% if has_errors %}<strong style="color:#c62828;">存在以下问题，请确认后下载。</strong>{% else %}确认后可执行下载。{% endif %}</p>
+
+  <div class="stat-row">
+    <span class="stat-chip">架构: <strong>{{ arch }}</strong></span>
+    <span class="stat-chip">仓库数: <strong>{{ repo_count }}</strong></span>
+    <span class="stat-chip">补丁: <strong>{{ patch_packages|length }}</strong></span>
+    <span class="stat-chip">相关: <strong>{{ related_packages|length }}</strong></span>
+    <span class="stat-chip">依赖: <strong>{{ dep_packages|length }}</strong></span>
+    <span class="stat-chip">待下载: <strong>{{ (patch_packages|length + related_packages|length + dep_packages|length) }}</strong></span>
+    {% if not_found %}
+    <span class="stat-chip error">未找到: <strong>{{ not_found|length }}</strong></span>
+    {% endif %}
+    {% if unresolved_deps %}
+    <span class="stat-chip warn">未解决依赖: <strong>{{ unresolved_deps|length }}</strong></span>
+    {% endif %}
+    {% if ignored_virtuals %}
+    <span class="stat-chip" style="background:#e8f5e9;color:#2e7d32;">已忽略虚拟包: <strong>{{ ignored_virtuals|length }}</strong></span>
+    {% endif %}
+  </div>
+
+  {# ── Ignore checkbox: always shown when there are errors ── #}
+  {% if has_errors %}
+  <div style="margin-top:10px; padding:10px 14px; background:#fff3cd; border:1px solid #ffc107; border-radius:4px; display:inline-block;">
+    <label style="font-weight:normal; cursor:pointer; margin:0;">
+      <input type="checkbox" id="ignoreErrors"> 忽略上述错误，继续下载
+    </label>
+  </div>
+  {% endif %}
+
+  {# ── Problem summary ── #}
+  {% if not_found %}
+  <div class="error-box">
+    <h3 style="margin-top:0">❌ 未找到的补丁包</h3>
+    <table>
+      <thead><tr><th>包名</th><th>base 版本</th></tr></thead>
+      <tbody>
+        {% for name, base_ver in not_found %}
+        <tr><td><code>{{ name }}</code></td><td>{{ base_ver if base_ver else '—' }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if unresolved_deps %}
+  <div class="warn-box">
+    <h3 style="margin-top:0">⚠️ 无法解决的依赖</h3>
+    <table>
+      <thead><tr><th>依赖包</th><th>依赖声明</th></tr></thead>
+      <tbody>
+        {% for name, raw_dep in unresolved_deps %}
+        <tr><td><code>{{ name }}</code></td><td>{{ raw_dep }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if ignored_virtuals %}
+  <div style="background:#e8f5e9; border:1px solid #4caf50; padding:12px 16px; border-radius:4px; margin-top:12px;">
+    <h3 style="margin-top:0;color:#2e7d32;">ℹ️ 已忽略的虚拟包</h3>
+    <p style="margin:4px 0 8px;font-size:0.9em;color:#555;">以下虚拟包未找到提供者，已自动忽略，不影响安装。</p>
+    <table>
+      <thead><tr><th>虚拟包名</th><th>依赖声明</th></tr></thead>
+      <tbody>
+        {% for name, raw_dep in ignored_virtuals %}
+        <tr><td><code>{{ name }}</code></td><td>{{ raw_dep }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {# ── Packages to download ── #}
+  {% if patch_packages or related_packages or dep_packages %}
+  <h2>将下载的包</h2>
+  <table>
+    <thead><tr><th>#</th><th>类型</th><th>包名</th><th>补丁版本</th><th>base 版本</th><th>目录</th></tr></thead>
+    <tbody>
+      {% for p in patch_packages %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td><span class="tag tag-patch">PATCH</span></td>
+        <td><code>{{ p.name }}</code></td>
+        <td class="version">{{ p.version }}</td>
+        <td class="base-hint">{{ p.base_version if p.base_version else '—' }}</td>
+        <td class="base-hint" style="max-width:150px; overflow:hidden; text-overflow:ellipsis;">{{ p.directory() }}</td>
+      </tr>
+      {% endfor %}
+      {% for p in related_packages %}
+      <tr>
+        <td>{{ patch_packages|length + loop.index }}</td>
+        <td><span class="tag tag-related">RELATED</span></td>
+        <td><code>{{ p.name }}</code></td>
+        <td class="version">{{ p.version }}</td>
+        <td class="base-hint">{{ p.base_version if p.base_version else '—' }}</td>
+        <td class="base-hint" style="max-width:150px; overflow:hidden; text-overflow:ellipsis;">{{ p.directory() }}</td>
+      </tr>
+      {% endfor %}
+      {% for p in dep_packages %}
+      <tr>
+        <td>{{ patch_packages|length + related_packages|length + loop.index }}</td>
+        <td><span class="tag tag-dep">DEP</span></td>
+        <td><code>{{ p.name }}</code></td>
+        <td class="version">{{ p.version }}</td>
+        <td class="base-hint">{{ p.base_version if p.base_version else '—' }}</td>
+        <td class="base-hint" style="max-width:150px; overflow:hidden; text-overflow:ellipsis;">{{ p.directory() }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="warn-box">没有需要下载的包。</div>
+  {% endif %}
+
+  {# ── Log ── #}
+  <h2>解析日志</h2>
+  <pre>{{ log }}</pre>
+
+  {# ── Download / actions ── #}
+  <form method="post" action="/run" id="downloadForm">
+    <input type="hidden" name="result_id" value="{{ result_id }}">
+    <input type="hidden" name="ignore_errors" id="ignoreErrorsHidden" value="0">
+    {% for key, value in form.items() %}
+    <input type="hidden" name="{{ key }}" value="{{ value }}">
+    {% endfor %}
+    <div class="button-row">
+      <button type="submit" class="download-btn" id="downloadBtn">
+        ⬇️ 开始下载 ({{ patch_packages|length + related_packages|length + dep_packages|length }} 个包)
+      </button>
+      <a class="button" href="/">返回修改配置</a>
+      <a class="button" href="/export-log/{{ result_id }}.txt" download>📄 导出解析日志</a>
+    </div>
+  </form>
+
+  <script>
+    // 顶部勾选框控制下载按钮和隐藏字段
+    var ignoreCb = document.getElementById('ignoreErrors');
+    var hiddenField = document.getElementById('ignoreErrorsHidden');
+    if (ignoreCb && hiddenField) {
+      ignoreCb.addEventListener('change', function() {
+        hiddenField.value = this.checked ? '1' : '0';
+      });
+    }
+  </script>
+</body>
+</html>

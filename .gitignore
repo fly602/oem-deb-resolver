@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# Local config (user-specific, do not commit)
+config/
+
+# Cache
+cache/
+
+# OS
+.DS_Store
+Thumbs.db

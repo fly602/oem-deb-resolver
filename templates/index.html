@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>OEM 补丁包下载配置</title>
+  <style>
+    body { font-family: Arial, sans-serif; line-height: 1.6; padding: 24px; max-width: 1000px; margin: auto; }
+    label { display: block; margin-top: 16px; font-weight: bold; }
+    input[type=text], textarea, select, input[type=number] {
+      padding: 8px; margin-top: 6px; box-sizing: border-box; font-size: 0.95em;
+    }
+    input[type=text] { width: 100%; }
+    textarea { width: 100%; min-height: 120px; font-family: monospace; font-size: 0.95em; }
+    .hint { color: #555; font-size: 0.95em; margin-top: 4px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .row > div { flex: 1 1 200px; }
+    button { margin-top: 18px; padding: 12px 22px; font-size: 1em; cursor: pointer; }
+
+    select { width: auto; min-width: 160px; }
+    .action-row { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 24px; }
+    .action-row button { background: #2196F3; color: #fff; border: none; border-radius: 4px; }
+    .action-row button:hover { background: #1976D2; }
+    .action-row button.full-upgrade { background: #FF9800; }
+    .action-row button.full-upgrade:hover { background: #f57c00; }
+    .action-row button.reset { background: #9e9e9e; }
+    .action-row button.reset:hover { background: #757575; }
+    .repo-example { background: #f5f5f5; border: 1px solid #e0e0e0; padding: 10px 14px; border-radius: 4px; margin-top: 4px; font-family: monospace; font-size: 0.9em; white-space: pre-wrap; word-break: break-all; }
+    .base-list-group { display: flex; gap: 6px; align-items: flex-start; margin-top: 6px; }
+    .base-list-group input { flex: 1; }
+    .base-list-group .btn-sm {
+      padding: 8px 12px; font-size: 0.9em; margin-top: 0; border-radius: 4px;
+      border: 1px solid #ccc; background: #fff; cursor: pointer; white-space: nowrap;
+    }
+    .base-list-group .btn-sm:hover { background: #f0f0f0; }
+    .base-list-group .btn-reset { background: #ffebee; border-color: #f44336; color: #c62828; }
+    .base-list-group .btn-reset:hover { background: #ffcdd2; }
+  </style>
+</head>
+<body>
+  <h1>OEM 补丁包下载配置</h1>
+  <p>配置补丁仓库和补丁包列表，工具自动解析同目录相关包和依赖，并下载所需 deb 包。</p>
+
+  <form method="post" action="/preview" id="mainForm">
+    <label>Base Package List（支持本地路径或在线 URL）</label>
+    <div class="base-list-group">
+      <input type="text" name="base_list" id="baseListInput" value="{{ base_list }}" placeholder="输入或选择 Base Package List 路径..." list="base-list-datalist">
+      <datalist id="base-list-datalist">
+        {% for item in base_lists %}
+        <option value="{{ item }}">
+        {% endfor %}
+      </datalist>
+      <button type="button" class="btn-sm btn-reset" id="btnResetBase" title="重置 Base Package List 配置">↺ 重置</button>
+    </div>
+    <p class="hint">当前基础镜像包列表共有 {{ base_count }} 个包。支持本地路径或 HTTP URL。</p>
+
+    <div class="row">
+      <div>
+        <label>目标架构</label>
+        <select name="architecture" id="archSelect">
+          <option value="amd64" {% if default_arch == 'amd64' %}selected{% endif %}>amd64 (x86_64)</option>
+          <option value="arm64" {% if default_arch == 'arm64' %}selected{% endif %}>arm64 (aarch64)</option>
+          <option value="sw_64" {% if default_arch == 'sw_64' %}selected{% endif %}>sw_64</option>
+          <option value="loongarch64" {% if default_arch == 'loongarch64' %}selected{% endif %}>loongarch64</option>
+          <option value="mips64" {% if default_arch == 'mips64' %}selected{% endif %}>mips64</option>
+          <option value="mips64el" {% if default_arch == 'mips64el' %}selected{% endif %}>mips64el</option>
+        </select>
+        <p class="hint">自动从 base 列表文件名检测，也可手动选择</p>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:4px; padding-top:16px;">
+        <label><input type="checkbox" name="include_recommends"> 包括 Recommends</label>
+      </div>
+    </div>
+
+    <label>补丁仓库（APT sources.list 格式，每行一个）</label>
+    <textarea name="patch_repo_lines" placeholder="deb [trusted=yes] https://repo.example.com unstable main">{{ patch_repo_lines }}</textarea>
+    <p class="hint">支持直接粘贴 apt sources.list 中的仓库行。优先级按行顺序（越靠前优先级越高）。</p>
+    <p class="hint">示例：</p>
+    <div class="repo-example">deb [trusted=yes] https://aptly.uniontech.com/pkg/snipe-2500u1/release-candidate/... unstable main
+deb [trusted=yes] https://aptly.uniontech.com/pkg/commercial-snipe-2500u1/release-candidate/... unstable commercial</div>
+
+    <label style="margin-top:24px;">补丁包列表</label>
+    <textarea name="patch_packages" placeholder="每行一个包名，支持 package=version 或 package:amd64">{{ patch_packages }}</textarea>
+    <p class="hint">示例：<code>dde-shell</code>、<code>custom-oem-fix=1.2.3-1</code></p>
+
+    <div class="action-row">
+      <button type="submit" formaction="/preview">🔍 预览解析结果</button>
+      <button type="submit" formaction="/full-upgrade-preview" class="full-upgrade">🚀 全量升级预览</button>
+      <button type="button" class="reset" id="btnResetAll">↺ 重置全部配置</button>
+    </div>
+    <div class="hint" style="margin-top:8px; color:#888;">
+      全量升级：扫描补丁仓库所有包，下载 base 中存在且版本更高的包（不指定具体包名）
+    </div>
+    <div class="hint" style="margin-top:4px; color:#888;">
+      预览和全量升级预览会自动保存当前配置。
+    </div>
+  </form>
+
+  <section style="margin-top: 32px;">
+    <h2>解析流程说明</h2>
+    <ol>
+      <li><strong>查找补丁包</strong> — 从补丁仓库查询，取版本最高的包。未找到则提示（显示 base 中的版本）。</li>
+      <li><strong>查找相关包</strong> — 在补丁包同一目录下扫描其他包，若 base 中存在且版本更低则一并下载。</li>
+      <li><strong>解析依赖</strong> — 下载后使用 <code>dpkg-deb --info</code> 解析 Depends 字段。对比 base 版本，满足则跳过，不满足则从补丁仓库下载。</li>
+      <li><strong>递归处理</strong> — 新下载的包也按步骤 1-3 处理其依赖，直到无新包。</li>
+    </ol>
+    <ul>
+      <li>直接通过 HTTP 获取远程仓库元数据，<strong>不依赖本地 apt-get</strong></li>
+      <li>依赖解析使用 <code>dpkg-deb</code>（下载后的 .deb 文件），结果最准确</li>
+    </ul>
+  </section>
+
+  <script>
+    // 选择/新增 base list 时，将其置顶（去重 + 移到第一位）
+    var baseListInput = document.getElementById('baseListInput');
+    baseListInput.addEventListener('change', function() {
+      var val = this.value.trim();
+      if (!val) return;
+      fetch('/add-base-list', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'path=' + encodeURIComponent(val)
+      });
+    });
+
+    // 清空 base list
+    document.getElementById('btnResetBase').addEventListener('click', function() {
+      baseListInput.value = '';
+      fetch('/reset-base-list', {method: 'POST'});
+    });
+
+    // 重置全部配置
+    document.getElementById('btnResetAll').addEventListener('click', function() {
+      if (confirm('确定要清空所有配置吗？')) {
+        fetch('/reset-config', {method: 'POST'}).then(function() {
+          window.location.reload();
+        });
+      }
+    });
+  </script>
+</body>
+</html>
