@@ -9,30 +9,18 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.cache/oem-deb-resolver}"
 # ── 安装系统包 ──
 install_pkg() {
     local pkg="$1"
-    if ! dpkg -l "$pkg" &> /dev/null; then
-        echo "安装系统包: $pkg ..."
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq "$pkg"
-    fi
-}
-
-# ── 确保 pip 可用 ──
-ensure_pip() {
-    if python3 -m pip --version &> /dev/null; then
+    if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
         return 0
     fi
-    echo "pip 未找到，正在安装..."
-    # 方式1: ensurepip
-    if python3 -m ensurepip --default-pip &> /dev/null; then
-        return 0
-    fi
-    # 方式2: apt 安装
-    install_pkg python3-pip
+    echo "安装系统包: $pkg ..."
+    sudo apt-get update
+    sudo apt-get install -y "$pkg"
 }
 
 echo "==> 检查系统依赖..."
 install_pkg git
 install_pkg python3
+install_pkg python3-pip
 
 echo "==> 克隆仓库到 $INSTALL_DIR ..."
 if [ -d "$INSTALL_DIR" ]; then
@@ -46,7 +34,6 @@ fi
 cd "$INSTALL_DIR"
 
 echo "==> 安装 Python 依赖..."
-ensure_pip
 python3 -m pip install --break-system-packages -q -r requirements.txt
 
 echo "==> 赋予脚本可执行权限..."
