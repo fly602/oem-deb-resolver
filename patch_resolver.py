@@ -84,6 +84,14 @@ class PatchPackage:
         fn = self.filename.rsplit("/", 1)[0]
         return fn
 
+    def parent_dir(self) -> str:
+        """Return the parent directory (e.g. 'pool/main/d' for 'pool/main/d/dde-shell/pkg.deb')."""
+        return str(Path(self.filename).parent.parent)
+
+    def parent_name(self) -> str:
+        """Return the immediate parent dir name (e.g. 'd' for 'pool/main/d/dde-shell/')."""
+        return Path(self.filename).parent.name
+
     def download_url(self) -> str:
         base = self.source_repo.rstrip("/")
         return f"{base}/{self.filename.lstrip('/')}"
@@ -586,6 +594,8 @@ class PatchResolver:
         # 依赖缓存：所有包共享，同一 dep 只解析一次
         # key: 包名, value: DepCacheEntry
         self.dep_cache: dict[str, DepCacheEntry] = {}
+        # 目录扫描中：防止递归扫描时重复处理正在扫描的目录
+        self._scanning_dirs: set[str] = set()
 
     # ── Step 1: Resolve requested patches ────────────────────────────────────
 
@@ -631,34 +641,35 @@ class PatchResolver:
 
         return found
 
-    # ── Step 2: Find related packages in same directory ───────────────────────
+    # ── Step 2: Find related packages in same parent directory ──────────────────
 
     def find_related(self, patch_names: list[str]) -> list[str]:
         """
-        For each patch package, look up its directory in the patch repo
-        and scan for related packages. Download a related package if its
+        For each patch package, scan ALL packages in its parent directory
+        (e.g. 'pool/main/d/') from the patch repo. Download a package if its
         version is strictly higher than the base version.
         """
         found = []
-        seen_dirs: set[str] = set()
+        seen_parent_dirs: set[str] = set()
         seen_related: set[str] = set()
 
         for name in patch_names:
             if name not in self.patch_pkgs:
                 continue
             pkg = self.patch_pkgs[name]
-            directory = pkg.directory()
+            parent_dir = pkg.parent_dir()    # e.g. 'pool/main/d'
+            parent_name = pkg.parent_name()  # e.g. 'd'
 
-            if directory in seen_dirs:
+            if parent_name in seen_parent_dirs:
                 continue
-            seen_dirs.add(directory)
+            seen_parent_dirs.add(parent_name)
 
-            self.log(f"  [RELATED] 扫描目录 {directory}/ ...")
+            self.log(f"  [RELATED] 扫描目录 {parent_dir}/ ...")
 
-            # Find all packages in this directory from the multi-index
+            # Find all packages in this parent directory
             related_candidates: list[PatchPackage] = []
             for dir_, pkgs in self.multi_index.by_directory.items():
-                if dir_ == directory or directory.startswith(dir_ + "/"):
+                if dir_.startswith(parent_dir + "/"):
                     for p in pkgs:
                         p_name = self._strip_suffix(p.name)
                         if p_name not in self.patch_pkgs and p_name not in seen_related:
@@ -673,7 +684,7 @@ class PatchResolver:
                 # 只有在 base 中存在且补丁版本 > base 版本时才下载
                 if not base_pkg:
                     self.related_scans.append(RelatedScan(
-                        directory=directory,
+                        directory=rel_pkg.directory(),
                         pkg_name=rel_name,
                         patch_version=rel_pkg.version,
                         base_version=None,
@@ -689,7 +700,7 @@ class PatchResolver:
                     self.related_pkgs[rel_name] = rel_pkg
                     found.append(rel_name)
                     self.related_scans.append(RelatedScan(
-                        directory=directory,
+                        directory=rel_pkg.directory(),
                         pkg_name=rel_name,
                         patch_version=rel_pkg.version,
                         base_version=base_pkg.version,
@@ -701,7 +712,7 @@ class PatchResolver:
                     )
                 else:
                     self.related_scans.append(RelatedScan(
-                        directory=directory,
+                        directory=rel_pkg.directory(),
                         pkg_name=rel_name,
                         patch_version=rel_pkg.version,
                         base_version=base_pkg.version,
@@ -711,6 +722,48 @@ class PatchResolver:
                     self.log(
                         f"    {rel_name}: 相关包但版本不更高 (base={base_pkg.version})，跳过"
                     )
+
+        return found
+
+    def scan_directory_upgrade(self, pkg: PatchPackage) -> list[str]:
+        """
+        给定一个已确定的包，扫描其所在目录（如 pool/main/d/dde-shell/）
+        下所有补丁仓库中的包。排除 dbgsym 调试包，排除已标记的包。
+        若包在 base 中存在且补丁版本 > base 版本，则加入 related_pkgs。
+        同一目录不会重复扫描。
+        """
+        found = []
+        target_dir = pkg.directory()
+
+        # 跳过已扫描或正在扫描的目录
+        if target_dir in self._scanning_dirs:
+            return found
+        self._scanning_dirs.add(target_dir)
+
+        candidates = self.multi_index.by_directory.get(target_dir, [])
+        for p in candidates:
+            name = self._strip_suffix(p.name)
+
+            # 排除 dbgsym 调试包
+            if "dbgsym" in name:
+                continue
+
+            # 排除已标记的包
+            if name in self.patch_pkgs or name in self.dep_pkgs or name in self.related_pkgs:
+                continue
+
+            base_pkg = self.base_packages.get(name)
+            if not base_pkg:
+                continue
+
+            cmp = _compare_versions(p.version, base_pkg.version)
+            if cmp > 0:
+                p.base_version = base_pkg.version
+                self.related_pkgs[name] = p
+                found.append(name)
+                self.log(
+                    f"    [RELATED] {name}: 目录扫描发现 (base {base_pkg.version} → 补丁 {p.version})"
+                )
 
         return found
 
@@ -965,11 +1018,8 @@ class PatchResolver:
         unresolved = []
         ignored_virtuals = []
 
-        all_names = list(self.patch_pkgs.keys()) + list(self.related_pkgs.keys())
-        for pkg_name in all_names:
-            pkg = self.patch_pkgs.get(pkg_name) or self.related_pkgs.get(pkg_name)
-            if not pkg:
-                continue
+        # 只处理传入的包列表（patch_names = 外层决定的新包）
+        for pkg_name in patch_names:
             local_file = self._downloaded_files.get(pkg_name)
             if not local_file or not local_file.exists():
                 continue
@@ -978,7 +1028,6 @@ class PatchResolver:
                 continue
             for raw_dep in raw_deps:
                 entry = self._resolve_dep(pkg_name, raw_dep)
-                # 用包名作为 unresolved 的 key，保证同组 dep 只有一个条目
                 dep_key_for_log = raw_dep.package_name
                 dep_name_display = raw_dep.package_name
                 if entry.status == "ok":
@@ -1031,16 +1080,9 @@ class PatchResolver:
         self.log("=" * 60)
         patch_names = self.resolve_patches(requested)
 
-        self.log("")
-        self.log("=" * 60)
-        self.log("步骤 2: 查找同目录相关补丁包（版本高于 base 则下载）")
-        self.log("=" * 60)
-        related_names = self.find_related(patch_names)
-
-        all_to_download: list[PatchPackage] = (
-            [self.patch_pkgs[n] for n in patch_names if n in self.patch_pkgs]
-            + [self.related_pkgs[n] for n in related_names if n in self.related_pkgs]
-        )
+        all_to_download: list[PatchPackage] = [
+            self.patch_pkgs[n] for n in patch_names if n in self.patch_pkgs
+        ]
 
         if dry_run:
             self.log("")
@@ -1049,12 +1091,12 @@ class PatchResolver:
             self.log("=" * 60)
             for p in all_to_download:
                 self.log(f"  {p.name} ({p.version}) from {p.download_url()}")
-            return self._build_result(output_dir, patch_names, related_names, [], [], [])
+            return self._build_result(output_dir, patch_names, [], all_to_download, [], [], [])
 
         if all_to_download:
             self.log("")
             self.log("=" * 60)
-            self.log(f"步骤 3: 下载 {len(all_to_download)} 个包")
+            self.log(f"步骤 2: 下载 {len(all_to_download)} 个包")
             self.log("=" * 60)
             dl_results = self.download_packages(all_to_download, output_dir, retry=retry)
             for fname, (status, path_or_err) in dl_results.items():
@@ -1066,39 +1108,79 @@ class PatchResolver:
         # Recursive dependency resolution
         self.log("")
         self.log("=" * 60)
-        self.log("步骤 4: 解析依赖（dpkg-deb --info + 版本对比）")
+        self.log("步骤 3: 解析依赖（dpkg-deb --info + 版本对比）")
         self.log("=" * 60)
 
-        # Step 4a: resolve deps for patch + related packages (already downloaded above)
-        all_dep_names: list[str] = []
+        # 当前已下载的所有包（patch + dep 递归层累积）
+        _downloaded_so_far: set[str] = set()   # 防止同一包被重复解析
         unresolved: list[tuple[str, str]] = []
-        _unresolved_keys: set[str] = set()   # 跨轮去重
+        _unresolved_keys: set[str] = set()
+        ignored_virtuals: list[tuple[str, str]] = []
+        _ignored_virtual_keys: set[str] = set()
         depth = 0
 
-        # Initial pass: process already-downloaded patch and related packages
-        init_names = list(self.patch_pkgs.keys()) + list(self.related_pkgs.keys())
-        new_names, new_unresolved, new_ignored_virtuals = self.resolve_deps(
-            init_names, output_dir, include_recommends
-        )
+        # ── 目录扫描：patch 包所在目录下的配套包 ──
+        for name in patch_names:
+            if name in self.patch_pkgs:
+                self.scan_directory_upgrade(self.patch_pkgs[name])
+
+        # ── 初始层：解析 patch 包，收集第一层依赖并下载 ──
+        init_names = list(self.patch_pkgs.keys())
+        _, new_unresolved, new_ignored_virtuals = self.resolve_deps(init_names, output_dir, include_recommends)
         for item in new_unresolved:
             if item[0] not in _unresolved_keys:
                 unresolved.append(item)
                 _unresolved_keys.add(item[0])
-        _ignored_virtual_keys: set[str] = set()
-        ignored_virtuals = []
         for item in new_ignored_virtuals:
             if item[0] not in _ignored_virtual_keys:
                 ignored_virtuals.append(item)
                 _ignored_virtual_keys.add(item[0])
-        all_dep_names = new_names  # 替换而非 extend（new_names 已是新包）
 
-        # Recursive passes: download dep packages, then resolve their deps
-        while all_dep_names and depth < self.max_depth:
+        # 递归：下载新发现的 dep 包 + related 包 → 解析其依赖 → 直到无新包
+        _related_downloaded: set[str] = set()
+        while True:
+            pending = [n for n in self.dep_pkgs if n not in _downloaded_so_far]
+            # 也将未下载的 related 包纳入本轮
+            pending_related = [n for n in self.related_pkgs if n not in _related_downloaded]
+            if not pending and not pending_related:
+                break
+            if depth >= self.max_depth:
+                break
+
+            # 下载 related 包（如有）
+            if pending_related:
+                related_to_dl = [self.related_pkgs[n] for n in pending_related]
+                dl_results = self.download_packages(related_to_dl, output_dir, retry=retry)
+                for fname, (status, path_or_err) in dl_results.items():
+                    if status == "success":
+                        self.log(f"    ✓ [RELATED] {fname}")
+                    else:
+                        self.log(f"    ✗ [RELATED] {fname}: {path_or_err}")
+                for n in pending_related:
+                    _related_downloaded.add(n)
+
+            if not pending:
+                # 只有 related 包，解析它们的依赖后继续下一轮
+                depth += 1
+                _, new_unresolved, new_ignored_virtuals = self.resolve_deps(pending_related, output_dir, include_recommends)
+                for item in new_unresolved:
+                    if item[0] not in _unresolved_keys:
+                        unresolved.append(item)
+                        _unresolved_keys.add(item[0])
+                for item in new_ignored_virtuals:
+                    if item[0] not in _ignored_virtual_keys:
+                        ignored_virtuals.append(item)
+                        _ignored_virtual_keys.add(item[0])
+                # 对 related 包也做目录扫描
+                for n in pending_related:
+                    if n in self.related_pkgs:
+                        self.scan_directory_upgrade(self.related_pkgs[n])
+                continue
+
             depth += 1
-            self.log(f"  ── 依赖层级 {depth}: {len(all_dep_names)} 个新包 ──")
+            self.log(f"  ── 依赖层级 {depth}: {len(pending)} 个新包 ──")
 
-            # Download newly discovered dep packages
-            pkgs_to_dl = [self.dep_pkgs[n] for n in all_dep_names if n in self.dep_pkgs]
+            pkgs_to_dl = [self.dep_pkgs[n] for n in pending]
             dl_results = self.download_packages(pkgs_to_dl, output_dir, retry=retry)
             for fname, (status, path_or_err) in dl_results.items():
                 if status == "success":
@@ -1106,11 +1188,17 @@ class PatchResolver:
                 else:
                     self.log(f"    ✗ {fname}: {path_or_err}")
 
-            # Resolve deps for newly downloaded dep packages only (避免重复解析)
-            next_names, new_unresolved, new_ignored_virtuals = self.resolve_deps(
-                all_dep_names, output_dir, include_recommends
-            )
-            # 跨轮去重：同 dep key 不会被追加两次
+            for n in pending:
+                _downloaded_so_far.add(n)
+
+            # 目录扫描：对新下载的 dep 包扫描其目录下的配套包
+            for n in pending:
+                if n in self.dep_pkgs:
+                    self.scan_directory_upgrade(self.dep_pkgs[n])
+
+            # 解析依赖：dep 包 + 本轮新下载的 related 包一起解析
+            all_to_resolve = pending + pending_related
+            _, new_unresolved, new_ignored_virtuals = self.resolve_deps(all_to_resolve, output_dir, include_recommends)
             for item in new_unresolved:
                 if item[0] not in _unresolved_keys:
                     unresolved.append(item)
@@ -1120,17 +1208,20 @@ class PatchResolver:
                     ignored_virtuals.append(item)
                     _ignored_virtual_keys.add(item[0])
 
-            if not next_names:
-                break
-            all_dep_names = next_names
-
         self.log("")
         self.log("=" * 60)
         self.log("步骤 5: 结果汇总")
         self.log("=" * 60)
 
         # Final download results
-        return self._build_result(output_dir, patch_names, related_names, all_dep_names, unresolved, ignored_virtuals)
+        return self._build_result(
+            output_dir,
+            patch_names,
+            list(self.related_pkgs.keys()),  # 目录扫描发现的配套包
+            list(self.dep_pkgs.keys()),       # 所有收集到的 dep 包
+            unresolved,
+            ignored_virtuals,
+        )
 
     def _build_result(
         self,
@@ -1150,7 +1241,7 @@ class PatchResolver:
         return ResolutionResult(
             patch_packages=patch_resolved,
             related_packages=related_resolved,
-            related_scans=self.related_scans,
+            related_scans=[],   # 已移除 find_related，不再有 related_scans
             dep_packages=dep_resolved,
             not_found=self.not_found,
             unresolved_deps=unresolved,
@@ -1207,8 +1298,6 @@ class ResolutionResult:
         lines = [
             f"补丁包 ({len(self.patch_packages)}):",
             *[f"  {p.name} {p.version}" for p in self.patch_packages],
-            f"相关包 ({len(self.related_packages)}):",
-            *[f"  {p.name} {p.version}" for p in self.related_packages],
             f"依赖包 ({len(self.dep_packages)}):",
             *[f"  {p.name} {p.version}" for p in self.dep_packages],
         ]
