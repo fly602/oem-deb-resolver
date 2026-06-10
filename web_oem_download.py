@@ -166,6 +166,7 @@ def save_preview_result(result, form_data: dict) -> str:
         "not_found": result.not_found,
         "unresolved_deps": result.unresolved_deps,
         "ignored_virtuals": result.ignored_virtuals,
+        "virtual_provided": result.virtual_provided,
         "log": result.log,
         "config_summary": result.config_summary,
         "form_data": form_data,
@@ -210,25 +211,38 @@ def _parse_sources_list(text: str) -> list[tuple[str, str, list[str]]]:
     return results
 
 
+# APT sources.list 中的架构名 → 实际目录名映射
+_ARCH_DIR_MAP = {
+    "sw_64": "sw64",
+    "loongarch64": "loong64",
+    "mips64": "mips64el",
+}
+
 def _parse_repos(form, arch: str) -> MultiRepoIndex:
     """Build MultiRepoIndex from sources.list textarea."""
     repo_lines = form.get("patch_repo_lines", "").strip()
     save_sources_list(repo_lines)
     mri = MultiRepoIndex()
     for priority, (url, dist, components) in enumerate(_parse_sources_list(repo_lines)):
+        arch_dir = _ARCH_DIR_MAP.get(arch, arch)
         mri.add_repo(repo_url=url, distribution=dist,
-                      components=components, architecture=arch, priority=priority)
+                      components=components, architecture=arch_dir, priority=priority)
     return mri
 
 
+INDEX_CACHE = CACHE_DIR / "indexes"
+
+
 def _fetch_indexes(mri, arch: str) -> list[str]:
-    """Fetch Packages index from every repo. Returns error messages."""
+    """Fetch Packages index from every repo with Release verification. Returns error messages."""
+    INDEX_CACHE.mkdir(parents=True, exist_ok=True)
     errors = []
     for cfg in mri.repos:
         try:
             idx = _fetch_and_parse_index(
                 base_url=cfg["url"], distribution=cfg["distribution"],
-                components=cfg["components"], architecture=arch,
+                components=cfg["components"], architecture=cfg["architecture"],
+                cache_dir=INDEX_CACHE, verify=False,
             )
             for _, pkgs in idx.by_directory.items():
                 for p in pkgs:
@@ -334,19 +348,11 @@ def preview():
     )
 
     try:
-        tmp_dir = _make_temp_dir()
         result = resolver.resolve(
             requested=requested,
-            output_dir=tmp_dir,
             include_recommends=bool(request.form.get("include_recommends")),
-            dry_run=False,
-            retry=0,
             config_summary=config_summary,
         )
-        # 预览用完即删，仅保留元数据用于显示
-        import shutil
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir)
     except Exception as exc:
         import traceback
         return render_template("result.html", success=False,
@@ -365,6 +371,7 @@ def preview():
         not_found=result.not_found,
         unresolved_deps=result.unresolved_deps,
         ignored_virtuals=result.ignored_virtuals,
+        virtual_provided=result.virtual_provided,
         log=result.log,
         form=request.form,
         arch=arch,
@@ -499,19 +506,12 @@ def full_upgrade_preview():
 
     # 将升级包名作为 requested，调用 resolve() 做完整依赖解析
     requested_names = [p.name for p in upgrade_pkgs]
-    tmp_dir = _make_temp_dir()
     try:
         result = resolver.resolve(
             requested=requested_names,
-            output_dir=tmp_dir,
             include_recommends=False,
-            dry_run=False,
-            retry=0,
             config_summary=config_summary,
         )
-        import shutil
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir)
     except Exception as exc:
         import traceback
         return render_template("result.html", success=False,
@@ -528,6 +528,7 @@ def full_upgrade_preview():
         not_found=result.not_found,
         unresolved_deps=result.unresolved_deps,
         ignored_virtuals=result.ignored_virtuals,
+        virtual_provided=result.virtual_provided,
         log=result.log,
         form=request.form,
         arch=arch,

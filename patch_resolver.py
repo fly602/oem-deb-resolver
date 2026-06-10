@@ -3,22 +3,25 @@
 apt_cache_resolver — Patch-centric APT dependency resolver.
 
 Algorithm:
-  1. For each requested patch, find the HIGHEST version in the patch repo.
-  2. For each found patch, scan its directory for related packages.
-     Download a related package if its version > base version.
-  3. After downloading, use `dpkg-deb --info` to parse real-time Depends.
-     Skip deps satisfied by base. Otherwise query patch repo for the highest version.
-  4. Recurse until no new packages appear.
-  5. Report unresolved deps with base-version hints.
+  1. Parse multiple repo Packages indexes, merge into a unified index (highest version wins).
+  2. For each requested patch, find the HIGHEST version in the merged index.
+  3. For each found patch, scan its directory for related packages from the index.
+     Mark a related package if its version > base version.
+  4. Resolve dependencies purely from Packages index (Depends/Pre-Depends/Provides).
+     Skip deps satisfied by base. Otherwise query merged index for the highest version.
+  5. Recurse until no new packages appear.
+  6. Report unresolved deps with base-version hints.
+  7. Download .deb files only in the separate download phase.
 
 No local apt-get/apt-cache required for repo queries.
-Only `dpkg-deb` is needed locally for dependency parsing (after download).
+No .deb download needed during dependency resolution — all metadata from Packages index.
 """
 
 import argparse
 import hashlib
 import gzip
 import bz2
+import json
 import lzma
 import os
 import re
@@ -42,6 +45,52 @@ try:
     _HAS_APT_PKG = True
 except ImportError:
     _HAS_APT_PKG = False
+
+
+# ─── apt-cache provider resolver ───────────────────────────────────────────────────
+
+_apt_provider_cache: dict[str, Optional[str]] = {}
+
+
+def _query_apt_provider(virtual_pkg: str) -> Optional[str]:
+    """
+    Query apt-cache showpkg to find the real package that provides a virtual package.
+    Returns the provider package name, or None if not found.
+    Results are cached per-process.
+    """
+    if virtual_pkg in _apt_provider_cache:
+        return _apt_provider_cache[virtual_pkg]
+
+    try:
+        result = subprocess.run(
+            ["apt-cache", "showpkg", virtual_pkg],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        _apt_provider_cache[virtual_pkg] = None
+        return None
+
+    # Parse "Reverse Provides:" section
+    # Format: "libqt6core6 6.8.0+dfsg-0deepin23 (= 6.8.0)"
+    in_provides = False
+    for line in result.stdout.splitlines():
+        line = line.rstrip()
+        if line == "Reverse Provides:":
+            in_provides = True
+            continue
+        if in_provides:
+            if line.strip() == "" or line.startswith("Dependencies:"):
+                break
+            # "pkgname version (= constraint)" or just "pkgname version"
+            parts = line.split()
+            if parts:
+                provider = parts[0]
+                _apt_provider_cache[virtual_pkg] = provider
+                return provider
+
+    _apt_provider_cache[virtual_pkg] = None
+    return None
+
 
 
 def _compare_versions(v1: str, v2: str) -> int:
@@ -153,6 +202,7 @@ class UnsatisfiedDep:
     resolution_status: str = "pending"   # pending | resolved | unresolved
     resolved_patch: Optional["PatchPackage"] = None
     resolution_note: str = ""
+    is_recommends: bool = False  # 是否为 Recommends 可选依赖
 
 
 @dataclass
@@ -164,6 +214,8 @@ class RepoIndex:
     by_directory: dict[str, list[PatchPackage]] = field(default_factory=dict)
     # Map: virtual package name → list of real package names that Provide it
     provides: dict[str, list[str]] = field(default_factory=dict)
+    # Map: package name → list of pre-parsed dependencies (from Packages index)
+    by_depends: dict[str, list[UnsatisfiedDep]] = field(default_factory=dict)
     _loaded: bool = False
 
 
@@ -179,6 +231,8 @@ class MultiRepoIndex:
     by_directory: dict[str, list[PatchPackage]] = field(default_factory=dict)
     # Combined: virtual package name → list of real package names that Provide it
     provides: dict[str, list[str]] = field(default_factory=dict)
+    # Combined: package name → pre-parsed dependencies from Packages index
+    by_depends: dict[str, list[UnsatisfiedDep]] = field(default_factory=dict)
 
     def add_repo(self, repo_url: str, distribution: str, components: list[str],
                  architecture: str, priority: int):
@@ -208,39 +262,176 @@ def _decompress(data: bytes) -> bytes:
     return data
 
 
+# ─── Release file parser ────────────────────────────────────────────────────────
+
+@dataclass
+class ReleaseInfo:
+    """Parsed Release file: SHA256 hashes keyed by relative file path."""
+    origin: str = ""
+    suite: str = ""
+    components: list[str] = field(default_factory=list)
+    architectures: list[str] = field(default_factory=list)
+    hashes: dict[str, tuple[str, int]] = field(default_factory=dict)  # path → (sha256, size)
+
+
+def _parse_release(text: str) -> ReleaseInfo:
+    """
+    Parse a Release file text, extracting SHA256 hashes from the SHA256 field.
+    Paths are relative to the dists/ root, e.g. 'main/binary-amd64/Packages.gz'.
+    """
+    info = ReleaseInfo()
+    in_sha256 = False
+
+    for line in text.splitlines():
+        line = line.rstrip("\r")
+        if not line:
+            if in_sha256:
+                in_sha256 = False
+            continue
+        if line.startswith("SHA256:"):
+            in_sha256 = True
+            continue
+        if in_sha256:
+            # Format: "sha256 size path" (space-separated)
+            parts = line.split()
+            if len(parts) >= 3:
+                sha256_hex = parts[0]
+                try:
+                    size = int(parts[1])
+                    path = parts[2]
+                    info.hashes[path] = (sha256_hex, size)
+                except ValueError:
+                    pass
+        else:
+            if line.startswith("Origin:"):
+                info.origin = line.split(":", 1)[1].strip()
+            elif line.startswith("Suite:"):
+                info.suite = line.split(":", 1)[1].strip()
+            elif line.startswith("Components:"):
+                info.components = line.split(":", 1)[1].strip().split()
+            elif line.startswith("Architectures:"):
+                info.architectures = line.split(":", 1)[1].strip().split()
+
+    return info
+
+
+def _hash_data(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+# ─── Cache helpers ─────────────────────────────────────────────────────────────
+
+def _cache_key(base_url: str, distribution: str, components: list[str], architecture: str) -> str:
+    """Generate a safe cache key for an index."""
+    comp_part = "_".join(sorted(components))
+    # Sanitize URL for use as directory name
+    safe_url = re.sub(r'[/:.+*?#%]', '_', base_url)[:80]
+    return f"{safe_url}__{distribution}__{comp_part}__{architecture}"
+
+
+def _load_cached_index(cache_dir: Path, cache_key: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Load cached Packages text and Release text from cache directory.
+    Returns (packages_text, release_text) or (None, None) if not cached.
+    """
+    cache_dir = cache_dir / cache_key
+    pkg_cache = cache_dir / "Packages.txt"
+    rel_cache = cache_dir / "Release"
+    if pkg_cache.exists():
+        packages_text = pkg_cache.read_text(encoding="utf-8", errors="replace")
+    else:
+        packages_text = None
+    if rel_cache.exists():
+        release_text = rel_cache.read_text(encoding="utf-8", errors="replace")
+    else:
+        release_text = None
+    return packages_text, release_text
+
+
+def _save_cached_index(cache_dir: Path, cache_key: str, packages_text: str, release_text: Optional[str]):
+    """Save Packages text and Release text to cache directory."""
+    cache_dir = cache_dir / cache_key
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "Packages.txt").write_text(packages_text, encoding="utf-8")
+    if release_text is not None:
+        (cache_dir / "Release").write_text(release_text, encoding="utf-8")
+    # Write metadata
+    meta = {
+        "cached_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "packages_size": len(packages_text),
+    }
+    (cache_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+
+def _fetch_url(url: str, timeout: int = 60) -> bytes:
+    req = urllib.request.Request(
+        url,
+        headers={"Accept-Encoding": "identity", "User-Agent": "patch-resolver/1.0"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+# ─── Index fetch with Release verification ─────────────────────────────────────
+
 def _fetch_and_parse_index(
     base_url: str,
     distribution: str,
     components: list[str],
     architecture: str,
     timeout: int = 60,
+    cache_dir: Optional[Path] = None,
+    verify: bool = True,
 ) -> RepoIndex:
     """
     Fetch Packages index from a single APT repository and parse it.
-    Tries Packages, Packages.gz, Packages.xz, Packages.bz2 in order.
+    1. Download Release file, parse SHA256 hashes.
+    2. Download Packages file, verify against Release SHA256.
+    3. Save both to cache_dir for debugging.
+    4. Falls back to unauthenticated download if Release fetch fails.
     """
     comp_str = "+".join(components) if len(components) > 1 else components[0]
-    index_base = (
-        f"{base_url.rstrip('/')}/dists/{distribution}/"
-        f"{comp_str}/binary-{architecture}/"
-    )
+    base = base_url.rstrip("/")
+
+    # 收集所有 (comp, arch) 组合的 Packages 索引 URL
+    # 所有标准 APT 仓库结构都是 base/dists/<suite>/<component>/binary-<arch>/Packages
+    # 仅当 distribution 已带 dists/ 前缀时跳过
+    if distribution.startswith("dists/"):
+        dist_prefix = ""
+    else:
+        dist_prefix = "dists/"
 
     index = RepoIndex(base_url=base_url)
+    release_info: Optional[ReleaseInfo] = None
+    last_error: Optional[Exception] = None
 
-    last_error = None
-    for suffix in ("", ".gz", ".xz", ".bz2"):
-        url = index_base + "Packages" + suffix
+    # ── Step 1: Download Release file ──
+    release_url = f"{base}/{dist_prefix}{distribution}/Release"
+    try:
+        raw_release = _fetch_url(release_url, timeout=timeout)
+        release_text = raw_release.decode("utf-8", errors="replace")
+        release_info = _parse_release(release_text)
+    except Exception as exc:
+        last_error = exc
+        release_info = None
+        # Non-fatal: continue without Release verification
+
+    # ── Step 2: Try each component+arch combination ──
+    tried_urls: list[tuple[str, str]] = []
+    for comp in components:
+        index_base = f"{base}/{dist_prefix}{distribution}/{comp}/binary-{architecture}/"
+        for suffix in ['', '.gz', '.xz', '.bz2']:
+            url = index_base + "Packages" + suffix
+            tried_urls.append((url, comp))
+
+    # 尝试下载所有组件的 Packages 文件，合并到同一个 index 中
+    all_texts: list[str] = []
+    for url, comp in tried_urls:
         try:
-            req = urllib.request.Request(
-                url,
-                headers={"Accept-Encoding": "identity", "User-Agent": "patch-resolver/1.0"},
-            )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read()
+            raw = _fetch_url(url, timeout=timeout)
             text = _decompress(raw).decode("utf-8", errors="replace")
+            all_texts.append(text)
             _parse_packages_text(text, base_url, index)
-            index._loaded = True
-            return index
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 last_error = exc
@@ -250,9 +441,21 @@ def _fetch_and_parse_index(
             last_error = exc
             continue
 
+    # 所有组件都尝试完后，保存合并缓存
+    if cache_dir is not None and all_texts:
+        key = _cache_key(base_url, distribution, components, architecture)
+        merged_text = "\n\n".join(all_texts)
+        _save_cached_index(cache_dir, key, merged_text, release_text if release_info else None)
+
+    if index.by_name:
+        index._loaded = True
+        return index
+
+    tried_sample = "\n  ".join(u for u, _ in tried_urls[:3])
+    if len(tried_urls) > 3:
+        tried_sample += f"\n  ... (+{len(tried_urls) - 3} more URLs)"
     raise RepositoryFetchError(
-        f"Could not fetch Packages index from {index_base} "
-        f"(tried Packages{{,.gz,.xz,.bz2}}): {last_error}"
+        f"Could not fetch Packages index (tried):\n  {tried_sample}\nLast error: {last_error}"
     )
 
 
@@ -309,12 +512,19 @@ def _normalize_sha256(raw: str) -> Optional[str]:
 def _parse_packages_text(text: str, source_repo: str, index: RepoIndex):
     """
     Parse a Packages index text block into a RepoIndex.
-    Populates index.by_name and index.by_directory.
+    Populates index.by_name, index.by_directory, and index.by_depends.
+
+    CRITICAL: by_depends is built from the HIGHEST version of each package only.
+    All raw blocks are collected first, then by_name/by_directory are populated,
+    and finally by_depends is populated from the highest-version blocks.
     """
     text = text.replace("\r\n", "\n")
-    blocks = re.split(r"\n\n+", text)
+    raw_blocks = re.split(r"\n\n+", text)
 
-    for block in blocks:
+    # ── Pass 1: parse all blocks into (fields, PatchPackage) ──
+    parsed: list[tuple[dict[str, str], PatchPackage]] = []
+
+    for block in raw_blocks:
         if not block.strip():
             continue
 
@@ -355,6 +565,8 @@ def _parse_packages_text(text: str, source_repo: str, index: RepoIndex):
         if not pkg.filename:
             continue
 
+        parsed.append((fields, pkg))
+
         dir_prefix = pkg.directory()
 
         # by_name: keep highest version per package name
@@ -369,16 +581,13 @@ def _parse_packages_text(text: str, source_repo: str, index: RepoIndex):
             index.by_directory[dir_prefix] = []
         index.by_directory[dir_prefix].append(pkg)
 
-        # Parse Provides field: e.g. "Provides: qt6-base-private-abi (= 6.8.0), ..."
-        # Note: apt_pkg.parse_depends 期望 "pkg (= ver)" 格式（无空格），
-        # 但 Provides 字段常写为 "pkg (= ver)"（有空格），因此用正则解析。
+        # Parse Provides field
         provides_raw = fields.get("Provides", "").strip()
         if provides_raw:
             for prov_str in provides_raw.split(","):
                 prov_str = prov_str.strip()
                 if not prov_str:
                     continue
-                # 提取包名（去掉可选的版本约束部分）
                 m = re.match(r'^([a-zA-Z0-9][a-zA-Z0-9.+\-]*)(?:\s*\(.*\))?\s*$', prov_str)
                 if m:
                     prov_pkg_name = m.group(1)
@@ -386,16 +595,56 @@ def _parse_packages_text(text: str, source_repo: str, index: RepoIndex):
                         index.provides[prov_pkg_name] = []
                     index.provides[prov_pkg_name].append(pkg.name)
 
+    # ── Pass 2: build by_depends from highest version only ──
+    for fields, pkg in parsed:
+        best = index.by_name.get(pkg.name)
+        if best is None or best.version != pkg.version:
+            continue  # Not the highest version, skip
+        if pkg.name in index.by_depends:
+            continue  # Already parsed deps for this package
+        pkg_deps: list[UnsatisfiedDep] = []
+        # 解析必需依赖
+        for dep_field in ("Depends", "Pre-Depends"):
+            raw_dep_str = fields.get(dep_field, "").strip()
+            if raw_dep_str:
+                pkg_deps.extend(_parse_dep(raw_dep_str))
+        # 解析 Recommends（可选依赖，不强制满足）
+        for dep_field in ("Recommends",):
+            raw_dep_str = fields.get(dep_field, "").strip()
+            if raw_dep_str:
+                rec_deps = _parse_dep(raw_dep_str)
+                # 标记为 Recommends 类型
+                for dep in rec_deps:
+                    dep.is_recommends = True
+                pkg_deps.extend(rec_deps)
+        index.by_depends[pkg.name] = pkg_deps
+
 
 def _merge_indexes(target: MultiRepoIndex, *sources: RepoIndex):
-    """Merge source RepoIndex into target MultiRepoIndex by name (highest version wins)."""
+    """
+    Merge source RepoIndex into target MultiRepoIndex by name (highest version wins).
+
+    Architecture:
+      1. Merge by_name, by_directory, provides (incremental, version-aware).
+      2. Track which source repo contributed the highest version for each package.
+      3. After ALL sources merged, populate by_depends from the winning sources.
+    """
+    # Track which RepoIndex contributed the highest version for each package.
+    # This enables correct by_depends lookup after all repos are merged.
+    _winner: dict[str, RepoIndex] = {}
+
+    # ── Step 1: Merge by_name (highest version wins) ──
     for src in sources:
         for name, pkg in src.by_name.items():
             if name not in target.by_name:
                 target.by_name[name] = pkg
+                _winner[name] = src
             elif _compare_versions(pkg.version, target.by_name[name].version) > 0:
                 target.by_name[name] = pkg
+                _winner[name] = src
 
+    # ── Step 2: Merge by_directory ──
+    for src in sources:
         for dir_, pkgs in src.by_directory.items():
             if dir_ not in target.by_directory:
                 target.by_directory[dir_] = []
@@ -404,13 +653,22 @@ def _merge_indexes(target: MultiRepoIndex, *sources: RepoIndex):
                 if p.name not in existing_names:
                     target.by_directory[dir_].append(p)
 
-        # Merge Provides map
+    # ── Step 3: Merge Provides ──
+    for src in sources:
         for virt_name, provider_list in src.provides.items():
             if virt_name not in target.provides:
                 target.provides[virt_name] = []
             for prov in provider_list:
                 if prov not in target.provides[virt_name]:
                     target.provides[virt_name].append(prov)
+
+    # ── Step 4: Populate by_depends from winning sources ──
+    # Each package's deps come from the source RepoIndex that contributed
+    # its highest version. This avoids the incremental-merge corruption bug.
+    for name, winner_src in _winner.items():
+        deps = winner_src.by_depends.get(name)
+        if deps is not None:
+            target.by_depends[name] = deps
 
 
 # ─── Base package loader ────────────────────────────────────────────────────────
@@ -562,9 +820,10 @@ class PatchResolver:
 
     Workflow:
       1. resolve_patches()    — find requested patches (highest version in repo)
-      2. find_related()       — in same directory, download if version > base
-      3. resolve_deps()       — dpkg-deb → parse deps → check base → query repo
+      2. scan_directory_upgrade() — scan same directory, mark if version > base
+      3. resolve_deps()       — pure Packages index parsing → check base → query repo
       4. Recurse until no new packages
+      5. Download phase (separate): download .deb files for confirmed packages
     """
 
     def __init__(
@@ -590,7 +849,6 @@ class PatchResolver:
         self.not_found: list[tuple[str, str]] = []  # (name, base_version)
         self.log_lines: list[str] = []
         self.config_summary: str = ""  # set by caller for passing to result
-        self._downloaded_files: dict[str, Path] = {}       # name → local file path
         # 依赖缓存：所有包共享，同一 dep 只解析一次
         # key: 包名, value: DepCacheEntry
         self.dep_cache: dict[str, DepCacheEntry] = {}
@@ -731,6 +989,9 @@ class PatchResolver:
         下所有补丁仓库中的包。排除 dbgsym 调试包，排除已标记的包。
         若包在 base 中存在且补丁版本 > base 版本，则加入 related_pkgs。
         同一目录不会重复扫描。
+
+        CRITICAL: 对每个候选包名，取合并索引中的最高版本（by_name），
+        而非目录列表中的第一个满足条件的版本。
         """
         found = []
         target_dir = pkg.directory()
@@ -741,8 +1002,13 @@ class PatchResolver:
         self._scanning_dirs.add(target_dir)
 
         candidates = self.multi_index.by_directory.get(target_dir, [])
+        # 收集去重后的包名
+        seen_names: set[str] = set()
         for p in candidates:
             name = self._strip_suffix(p.name)
+            if name in seen_names:
+                continue
+            seen_names.add(name)
 
             # 排除 dbgsym 调试包
             if "dbgsym" in name:
@@ -756,13 +1022,18 @@ class PatchResolver:
             if not base_pkg:
                 continue
 
-            cmp = _compare_versions(p.version, base_pkg.version)
+            # 使用合并索引中的最高版本（by_name），而非目录列表中的版本
+            best = self.multi_index.by_name.get(name)
+            if not best:
+                continue
+
+            cmp = _compare_versions(best.version, base_pkg.version)
             if cmp > 0:
-                p.base_version = base_pkg.version
-                self.related_pkgs[name] = p
+                best.base_version = base_pkg.version
+                self.related_pkgs[name] = best
                 found.append(name)
                 self.log(
-                    f"    [RELATED] {name}: 目录扫描发现 (base {base_pkg.version} → 补丁 {p.version})"
+                    f"    [RELATED] {name}: 目录扫描发现 (base {base_pkg.version} → 补丁 {best.version})"
                 )
 
         return found
@@ -792,15 +1063,20 @@ class PatchResolver:
 
         for name, pkg in self.multi_index.by_name.items():
             base_pkg = self.base_packages.get(name)
+
+            # 情况1: base 中不存在此包 → 跳过（不在全量升级范围内）
             if not base_pkg:
                 skipped_not_in_base += 1
                 continue
 
+            # 情况2: base 中存在，比较版本
             cmp = _compare_versions(pkg.version, base_pkg.version)
             if cmp <= 0:
+                # 补丁版本 <= base 版本，不升级
                 skipped_same_or_lower += 1
                 continue
 
+            # 情况3: 补丁版本 > base 版本 → 需要升级
             pkg.base_version = base_pkg.version
             result.append(pkg)
             self.log(
@@ -875,14 +1151,11 @@ class PatchResolver:
             for future in as_completed(futures):
                 fname, status, path_or_err = future.result()
                 results[fname] = (status, path_or_err)
-                pkg = futures[future]
-                if status == "success":
-                    self._downloaded_files[pkg.name] = Path(path_or_err)
 
         return results
 
 
-    # ── Step 4: Resolve deps via dpkg-deb ────────────────────────────────────
+    # ── Step 4: Resolve deps via Packages index ──────────────────────────────────
 
     def _resolve_dep(self, pkg_name: str, raw_dep) -> "DepCacheEntry":
         """
@@ -955,6 +1228,25 @@ class PatchResolver:
         is_virtual = (dep_key in self.multi_index.provides)
 
         if not is_virtual:
+            # ── 3a. 通过 apt-cache showpkg 动态查询提供者 ──
+            provider_name = _query_apt_provider(dep_key)
+            if provider_name:
+                base_prov = self.base_packages.get(provider_name)
+                if base_prov:
+                    entry = DepCacheEntry(
+                        status="virtual-provided",
+                        base_version=base_prov.version,
+                        provider_name=provider_name,
+                        note=f"虚拟包 {dep_key}，由 base 中的 {provider_name} ({base_prov.version}) 提供"
+                    )
+                else:
+                    entry = DepCacheEntry(
+                        status="virtual-provided",
+                        note=f"虚拟包 {dep_key}，由 apt 查询到 {provider_name} 提供（base 中暂无该提供者）"
+                    )
+                self.dep_cache[dep_key] = entry
+                return entry
+
             # 真实包，仓库里没有它 → missing
             entry = DepCacheEntry(
                 status="missing",
@@ -1006,25 +1298,26 @@ class PatchResolver:
 
     def resolve_deps(
         self,
-        patch_names: list,
-        output_dir,
+        pkg_names: list,
         include_recommends: bool = False,
     ):
         """
-        解析已下载包的依赖，结果统一从 dep_cache 命中。
-        Returns: (newly_resolved_names, unresolved_dep_tuples)
+        纯索引依赖解析：仅通过 Packages 索引的 by_depends 获取依赖信息。
+        不下载 .deb，不调用 dpkg-deb。
+        Results统一从 dep_cache 命中。
+        Returns: (newly_resolved_names, unresolved_dep_tuples, ignored_virtuals, virtual_provided)
         """
         new_names = []
         unresolved = []
         ignored_virtuals = []
+        virtual_provided = []
 
-        # 只处理传入的包列表（patch_names = 外层决定的新包）
-        for pkg_name in patch_names:
-            local_file = self._downloaded_files.get(pkg_name)
-            if not local_file or not local_file.exists():
-                continue
-            raw_deps = parse_dpkg_info(local_file)
-            if not raw_deps:
+        # 只处理传入的包列表（pkg_names = 外层决定的新包）
+        for pkg_name in pkg_names:
+            # 从 Packages 索引获取依赖（已预解析）
+            raw_deps = self.multi_index.by_depends.get(pkg_name)
+            if raw_deps is None:
+                # 索引中没有依赖信息，跳过
                 continue
             for raw_dep in raw_deps:
                 entry = self._resolve_dep(pkg_name, raw_dep)
@@ -1034,6 +1327,8 @@ class PatchResolver:
                     self.log(f"    [DEP OK] {dep_name_display}: {entry.note}")
                 elif entry.status == "virtual-provided":
                     self.log(f"    [DEP OK] {dep_name_display}: {entry.note}")
+                    if not any(v[0] == dep_key_for_log for v in virtual_provided):
+                        virtual_provided.append((dep_key_for_log, raw_dep.raw, entry.note))
                 elif entry.status == "ignored-virtual":
                     self.log(f"    [DEP IGNORE] {dep_name_display}: {entry.note}")
                     if not any(v[0] == dep_key_for_log for v in ignored_virtuals):
@@ -1051,7 +1346,7 @@ class PatchResolver:
                     self.log(f"    [DEP MISSING] {dep_name_display}: {entry.note}")
                     if not any(u[0] == dep_key_for_log for u in unresolved):
                         unresolved.append((dep_key_for_log, raw_dep.raw))
-        return new_names, unresolved, ignored_virtuals
+        return new_names, unresolved, ignored_virtuals, virtual_provided
 
 
     # ── Full resolution pipeline ──────────────────────────────────────────────
@@ -1059,7 +1354,7 @@ class PatchResolver:
     def resolve(
         self,
         requested: list[str],
-        output_dir: Path,
+        output_dir: Optional[Path] = None,
         include_recommends: bool = False,
         dry_run: bool = False,
         retry: int = 1,
@@ -1067,6 +1362,8 @@ class PatchResolver:
     ) -> "ResolutionResult":
         """
         Run the full patch-centric resolution pipeline.
+        所有依赖解析均通过 Packages 索引完成，不下载 .deb 文件。
+        下载仅在 /run 路由中单独执行。
         Returns a ResolutionResult with all details.
         """
         self.config_summary = config_summary
@@ -1080,53 +1377,27 @@ class PatchResolver:
         self.log("=" * 60)
         patch_names = self.resolve_patches(requested)
 
-        all_to_download: list[PatchPackage] = [
-            self.patch_pkgs[n] for n in patch_names if n in self.patch_pkgs
-        ]
-
-        if dry_run:
-            self.log("")
-            self.log("=" * 60)
-            self.log(f"DRY RUN — 共 {len(all_to_download)} 个包待下载")
-            self.log("=" * 60)
-            for p in all_to_download:
-                self.log(f"  {p.name} ({p.version}) from {p.download_url()}")
-            return self._build_result(output_dir, patch_names, [], all_to_download, [], [], [])
-
-        if all_to_download:
-            self.log("")
-            self.log("=" * 60)
-            self.log(f"步骤 2: 下载 {len(all_to_download)} 个包")
-            self.log("=" * 60)
-            dl_results = self.download_packages(all_to_download, output_dir, retry=retry)
-            for fname, (status, path_or_err) in dl_results.items():
-                if status == "success":
-                    self.log(f"  ✓ {fname} → {path_or_err}")
-                else:
-                    self.log(f"  ✗ {fname}: {path_or_err}")
-
-        # Recursive dependency resolution
+        # 纯索引解析：不下载任何 .deb 文件
         self.log("")
         self.log("=" * 60)
-        self.log("步骤 3: 解析依赖（dpkg-deb --info + 版本对比）")
+        self.log("步骤 2: 纯索引依赖解析（Packages 元数据）")
         self.log("=" * 60)
 
-        # 当前已下载的所有包（patch + dep 递归层累积）
-        _downloaded_so_far: set[str] = set()   # 防止同一包被重复解析
         unresolved: list[tuple[str, str]] = []
         _unresolved_keys: set[str] = set()
         ignored_virtuals: list[tuple[str, str]] = []
         _ignored_virtual_keys: set[str] = set()
-        depth = 0
+        virtual_provided: list[tuple[str, str, str]] = []   # (pkg, raw_dep, note)
+        _virtual_provided_keys: set[str] = set()
 
         # ── 目录扫描：patch 包所在目录下的配套包 ──
         for name in patch_names:
             if name in self.patch_pkgs:
                 self.scan_directory_upgrade(self.patch_pkgs[name])
 
-        # ── 初始层：解析 patch 包，收集第一层依赖并下载 ──
+        # ── 初始层：解析 patch 包，收集第一层依赖 ──
         init_names = list(self.patch_pkgs.keys())
-        _, new_unresolved, new_ignored_virtuals = self.resolve_deps(init_names, output_dir, include_recommends)
+        _, new_unresolved, new_ignored_virtuals, new_virtual_provided = self.resolve_deps(init_names, include_recommends)
         for item in new_unresolved:
             if item[0] not in _unresolved_keys:
                 unresolved.append(item)
@@ -1135,70 +1406,39 @@ class PatchResolver:
             if item[0] not in _ignored_virtual_keys:
                 ignored_virtuals.append(item)
                 _ignored_virtual_keys.add(item[0])
+        for item in new_virtual_provided:
+            if item[0] not in _virtual_provided_keys:
+                virtual_provided.append(item)
+                _virtual_provided_keys.add(item[0])
 
-        # 递归：下载新发现的 dep 包 + related 包 → 解析其依赖 → 直到无新包
-        _related_downloaded: set[str] = set()
+        # 递归：解析新发现的 dep 包和 related 包的依赖，直到无新包
+        depth = 0
+        _resolved_so_far: set[str] = set(patch_names)
         while True:
-            pending = [n for n in self.dep_pkgs if n not in _downloaded_so_far]
-            # 也将未下载的 related 包纳入本轮
-            pending_related = [n for n in self.related_pkgs if n not in _related_downloaded]
+            pending = [n for n in self.dep_pkgs if n not in _resolved_so_far]
+            pending_related = [n for n in self.related_pkgs if n not in _resolved_so_far]
             if not pending and not pending_related:
                 break
             if depth >= self.max_depth:
                 break
 
-            # 下载 related 包（如有）
-            if pending_related:
-                related_to_dl = [self.related_pkgs[n] for n in pending_related]
-                dl_results = self.download_packages(related_to_dl, output_dir, retry=retry)
-                for fname, (status, path_or_err) in dl_results.items():
-                    if status == "success":
-                        self.log(f"    ✓ [RELATED] {fname}")
-                    else:
-                        self.log(f"    ✗ [RELATED] {fname}: {path_or_err}")
-                for n in pending_related:
-                    _related_downloaded.add(n)
-
-            if not pending:
-                # 只有 related 包，解析它们的依赖后继续下一轮
-                depth += 1
-                _, new_unresolved, new_ignored_virtuals = self.resolve_deps(pending_related, output_dir, include_recommends)
-                for item in new_unresolved:
-                    if item[0] not in _unresolved_keys:
-                        unresolved.append(item)
-                        _unresolved_keys.add(item[0])
-                for item in new_ignored_virtuals:
-                    if item[0] not in _ignored_virtual_keys:
-                        ignored_virtuals.append(item)
-                        _ignored_virtual_keys.add(item[0])
-                # 对 related 包也做目录扫描
-                for n in pending_related:
-                    if n in self.related_pkgs:
-                        self.scan_directory_upgrade(self.related_pkgs[n])
-                continue
-
             depth += 1
-            self.log(f"  ── 依赖层级 {depth}: {len(pending)} 个新包 ──")
+            all_to_resolve = pending + pending_related
+            if pending:
+                self.log(f"  ── 依赖层级 {depth}: {len(all_to_resolve)} 个新包 ──")
 
-            pkgs_to_dl = [self.dep_pkgs[n] for n in pending]
-            dl_results = self.download_packages(pkgs_to_dl, output_dir, retry=retry)
-            for fname, (status, path_or_err) in dl_results.items():
-                if status == "success":
-                    self.log(f"    ✓ {fname}")
-                else:
-                    self.log(f"    ✗ {fname}: {path_or_err}")
-
-            for n in pending:
-                _downloaded_so_far.add(n)
-
-            # 目录扫描：对新下载的 dep 包扫描其目录下的配套包
+            # 目录扫描：对新发现的 dep 包扫描其目录下的配套包
             for n in pending:
                 if n in self.dep_pkgs:
                     self.scan_directory_upgrade(self.dep_pkgs[n])
 
-            # 解析依赖：dep 包 + 本轮新下载的 related 包一起解析
-            all_to_resolve = pending + pending_related
-            _, new_unresolved, new_ignored_virtuals = self.resolve_deps(all_to_resolve, output_dir, include_recommends)
+            # 对 related 包也做目录扫描
+            for n in pending_related:
+                if n in self.related_pkgs:
+                    self.scan_directory_upgrade(self.related_pkgs[n])
+
+            # 纯索引解析依赖（不下载）
+            _, new_unresolved, new_ignored_virtuals, new_virtual_provided = self.resolve_deps(all_to_resolve, include_recommends)
             for item in new_unresolved:
                 if item[0] not in _unresolved_keys:
                     unresolved.append(item)
@@ -1207,20 +1447,28 @@ class PatchResolver:
                 if item[0] not in _ignored_virtual_keys:
                     ignored_virtuals.append(item)
                     _ignored_virtual_keys.add(item[0])
+            for item in new_virtual_provided:
+                if item[0] not in _virtual_provided_keys:
+                    virtual_provided.append(item)
+                    _virtual_provided_keys.add(item[0])
+
+            for n in all_to_resolve:
+                _resolved_so_far.add(n)
 
         self.log("")
         self.log("=" * 60)
-        self.log("步骤 5: 结果汇总")
+        self.log("步骤 3: 结果汇总")
         self.log("=" * 60)
 
-        # Final download results
+        # Final result (no downloaded files in this phase)
         return self._build_result(
-            output_dir,
+            output_dir or Path("."),
             patch_names,
             list(self.related_pkgs.keys()),  # 目录扫描发现的配套包
             list(self.dep_pkgs.keys()),       # 所有收集到的 dep 包
             unresolved,
             ignored_virtuals,
+            virtual_provided,
         )
 
     def _build_result(
@@ -1231,12 +1479,11 @@ class PatchResolver:
         dep_names: list[str],
         unresolved: list[tuple[str, str]],
         ignored_virtuals: list[tuple[str, str]],
+        virtual_provided: list[tuple[str, str, str]] = [],
     ) -> "ResolutionResult":
         patch_resolved = [self.patch_pkgs[n] for n in patch_names if n in self.patch_pkgs]
         related_resolved = [self.related_pkgs[n] for n in related_names if n in self.related_pkgs]
         dep_resolved = [self.dep_pkgs[n] for n in dep_names if n in self.dep_pkgs]
-
-        all_files = list(self._downloaded_files.values())
 
         return ResolutionResult(
             patch_packages=patch_resolved,
@@ -1246,9 +1493,10 @@ class PatchResolver:
             not_found=self.not_found,
             unresolved_deps=unresolved,
             ignored_virtuals=ignored_virtuals,
+            virtual_provided=virtual_provided,
             log="\n".join(self.log_lines),
             output_dir=output_dir,
-            all_downloaded_files=all_files,
+            all_downloaded_files=[],  # 解析阶段不下载，下载在 /run 路由中单独执行
             config_summary=self.config_summary,
         )
 
@@ -1289,6 +1537,7 @@ class ResolutionResult:
     all_downloaded_files: list[Path]
     # config snapshot
     config_summary: str = ""                     # "Base: ... | Arch: ... | Repos: ..."
+    virtual_provided: list[tuple[str, str, str]] = field(default_factory=list)  # (name, raw_dep, note)
 
     @property
     def all_packages(self) -> list[PatchPackage]:
