@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}版本管理 · OEM 升级包中心{% endblock %}
+{% block content %}
+<header class="page">
+  <div class="brand">
+    <img class="brand-icon" src="{{ url_for('static', filename='icon.svg') }}" alt="">
+    <div>
+      <div class="brand-kicker">OEM 升级包中心</div>
+      <h1>版本管理</h1>
+      <p>每个版本维护一份基线清单和多组补丁仓库，按仓库逐个检查可升级包。</p>
+    </div>
+  </div>
+  <div class="actions" style="margin-top:0">
+    <a class="btn primary" href="{{ url_for('version_new') }}">+ 新增版本</a>
+  </div>
+</header>
+
+{% if versions %}
+<table>
+  <thead>
+    <tr>
+      <th>版本</th>
+      <th>架构</th>
+      <th class="num">仓库组</th>
+      <th>仓库</th>
+      <th>创建时间</th>
+      <th>操作</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for version in versions %}
+    <tr>
+      <td><a href="{{ url_for('version_detail', version_id=version.id) }}"><strong>{{ version.name }}</strong></a></td>
+      <td>{{ version.display_arch|default(version.arch) }}</td>
+      <td class="num">{{ version.groups|length }}</td>
+      <td class="muted">
+        {% for group in version.groups %}
+          {{ group.name }}{% if not loop.last %}、{% endif %}
+        {% endfor %}
+      </td>
+      <td class="muted">{{ version.created_at|default('—', true) }}</td>
+      <td style="white-space:nowrap">
+        <div style="display:flex; align-items:center; gap:8px">
+          <form method="post" action="{{ url_for('version_check', version_id=version.id) }}" style="display:inline; margin:0">
+            <button type="submit" class="btn sm primary">检查更新</button>
+          </form>
+          <a class="btn sm" href="{{ url_for('version_edit', version_id=version.id) }}">编辑</a>
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">还没有版本。点击右上角“新增版本”创建第一个。</div>
+{% endif %}
+{% endblock %}

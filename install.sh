@@ -37,12 +37,16 @@ echo "==> 安装 Python 依赖..."
 python3 -m pip install --break-system-packages -q -r requirements.txt
 
 echo "==> 赋予脚本可执行权限..."
-chmod +x web_oem_download.py install.sh run-oem-web.sh
+chmod +x oem_deb_fetch.py web_fetch.py run-fetch-web.sh install.sh
 
 echo ""
 echo "安装完成！"
-echo "启动方式："
+echo "CLI 用法："
 echo "  cd $INSTALL_DIR"
-echo "  python3 web_oem_download.py"
+echo "  ./oem_deb_fetch.py --base-list <基线清单> --repo '<仓库>' --arch amd64 --zip"
+echo ""
+echo "Web 启动方式："
+echo "  cd $INSTALL_DIR"
+echo "  ./run-fetch-web.sh"
 echo ""
 echo "服务地址: http://127.0.0.1:51234"

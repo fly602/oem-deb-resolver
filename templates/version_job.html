@@ -1,0 +1,335 @@
+{% extends "base.html" %}
+{% block title %}下载 · {{ version.name }} · OEM 升级包中心{% endblock %}
+{% block style %}
+    .progress-panel { margin-bottom: 18px; }
+    .progress-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+    .progress-head strong { font-size: 16px; }
+    .progress-track { height: 9px; background: #eef0f3; border-radius: 999px; overflow: hidden; }
+    .progress-fill { height: 100%; width: 0; background: var(--accent); border-radius: 999px; transition: width 0.25s; }
+    .progress-fill.done { background: var(--ok); }
+    .zip-line { margin-top: 10px; color: var(--muted); font-size: 13px; }
+    .unsigned-row td { background: var(--error-soft); }
+    .cell-main { font-weight: 600; }
+    .cell-sub { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+    .cell-sub.error { color: var(--error); }
+    .cell-sub.ok { color: var(--ok); }
+    .gate-box { border: 1px solid #fedf89; background: #fffaeb; border-radius: 12px; padding: 18px 20px; margin-top: 20px; }
+    .gate-box p { margin: 0 0 12px; color: #b54708; }
+    .gate-box label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+    .gate-box input[type=checkbox] { width: 17px; height: 17px; margin: 0; }
+{% endblock %}
+{% block content %}
+<header class="page">
+  <div>
+    <h1>下载 · {{ version.name }}</h1>
+    <p>按项目实时显示下载与验签进度；未签名项目会置顶。</p>
+  </div>
+  <div class="actions" style="margin-top:0">
+    <button type="button" class="btn danger" id="stopBtn">停止</button>
+    <a class="btn" href="{{ url_for('version_detail', version_id=version.id) }}">返回</a>
+    <a class="btn" href="{{ url_for('index') }}">主页</a>
+  </div>
+</header>
+
+<div class="panel progress-panel">
+  <div class="progress-head">
+    <strong id="stageText">准备中…</strong>
+    <span class="muted" id="stageDetail"></span>
+  </div>
+  <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+  <div class="zip-line" id="zipLine" style="display:none">文件名：<span class="mono" id="zipName"></span></div>
+</div>
+
+<div class="chips">
+  <span class="chip">文件 <strong id="totalCount">0</strong></span>
+  <span class="chip">下载 <strong id="completedCount">0</strong></span>
+  <span class="chip">验签 <strong id="verifiedCount">0</strong></span>
+  <span class="chip" id="unsignedChip" style="display:none; color:var(--error)">未签名 <strong id="unsignedCount">0</strong></span>
+</div>
+
+<div class="box error" id="errorBox" style="display:none"></div>
+
+<table>
+  <thead>
+    <tr><th>项目</th><th>仓库</th><th>架构</th><th class="num">包数</th><th>下载</th><th>验签</th></tr>
+  </thead>
+  <tbody id="projectBody">
+    <tr><td colspan="6" class="muted">正在准备下载任务…</td></tr>
+  </tbody>
+</table>
+
+<div class="gate-box" id="gateBox" style="display:none">
+  <p><strong>当前仓库存在未签名的补丁包，可能存在风险，我已知晓并确定下载。</strong></p>
+  <label>
+    <input type="checkbox" id="ackCheck">
+    我已知晓并确定下载
+  </label>
+  <div class="actions" style="margin-top:14px">
+    <button type="button" class="primary" id="gateDownloadBtn" disabled>下载</button>
+  </div>
+</div>
+
+<div class="panel" id="manualBox" style="display:none">
+  <strong>打包完成</strong>
+  <p class="hint" id="manualHint"></p>
+  <a class="btn primary" id="manualLink" href="#">下载 zip</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (function () {
+    var statusUrl = "{{ url_for('job_status', job_id=job.id) }}";
+    var stopUrl = "{{ url_for('job_stop', job_id=job.id) }}";
+    var packageUrl = "{{ url_for('job_package', job_id=job.id) }}";
+    var stopBtn = document.getElementById('stopBtn');
+    var stageText = document.getElementById('stageText');
+    var stageDetail = document.getElementById('stageDetail');
+    var progressFill = document.getElementById('progressFill');
+    var zipLine = document.getElementById('zipLine');
+    var zipName = document.getElementById('zipName');
+    var totalCount = document.getElementById('totalCount');
+    var completedCount = document.getElementById('completedCount');
+    var verifiedCount = document.getElementById('verifiedCount');
+    var unsignedChip = document.getElementById('unsignedChip');
+    var unsignedCount = document.getElementById('unsignedCount');
+    var projectBody = document.getElementById('projectBody');
+    var gateBox = document.getElementById('gateBox');
+    var ackCheck = document.getElementById('ackCheck');
+    var gateDownloadBtn = document.getElementById('gateDownloadBtn');
+    var manualBox = document.getElementById('manualBox');
+    var manualLink = document.getElementById('manualLink');
+    var manualHint = document.getElementById('manualHint');
+    var errorBox = document.getElementById('errorBox');
+    var autoTriggered = false;
+    var downloadTriggered = false;
+    var polling = false;
+
+    function el(tag, className, text) {
+      var node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+
+    function renderProjects(projects) {
+      projectBody.textContent = '';
+      if (!projects.length) {
+        var empty = el('tr');
+        var cell = el('td', 'muted', '没有文件。');
+        cell.colSpan = 6;
+        empty.appendChild(cell);
+        projectBody.appendChild(empty);
+        return;
+      }
+      projects.forEach(function (project) {
+        var row = el('tr');
+        if (project.unsigned) row.className = 'unsigned-row';
+
+        var name = el('td');
+        name.appendChild(el('div', 'cell-main', project.name));
+        row.appendChild(name);
+
+        row.appendChild(el('td', 'muted', project.repo));
+        row.appendChild(el('td', 'mono', project.arches.join(', ')));
+        row.appendChild(el('td', 'num', project.package_count));
+
+        var download = el('td');
+        download.appendChild(el('div', 'cell-main', project.downloaded + ' / ' + project.total));
+        if (project.download_failed) {
+          download.appendChild(el('div', 'cell-sub error', '失败 ' + project.download_failed));
+        }
+        row.appendChild(download);
+
+        var verify = el('td');
+        verify.appendChild(el('div', 'cell-main', project.verified + ' / ' + project.total));
+        if (project.unsigned) {
+          verify.appendChild(el('div', 'cell-sub error', '未签名 ' + project.unsigned));
+        } else if (project.skipped) {
+          verify.appendChild(el('div', 'cell-sub', '跳过 ' + project.skipped));
+        } else if (project.total && project.verified === project.total) {
+          verify.appendChild(el('div', 'cell-sub ok', '全部通过'));
+        }
+        row.appendChild(verify);
+
+        projectBody.appendChild(row);
+      });
+    }
+
+    function stageLabel(data) {
+      switch (data.stage) {
+        case 'downloading':
+          return '下载中';
+        case 'verifying':
+          return '验签中';
+        case 'packaging':
+          return '打包中…';
+        case 'gated':
+          return '下载完成，存在未签名包，等待确认';
+        case 'ready':
+          return data.auto_zip ? '打包已完成，正在下载…' : '打包完成，可手动下载';
+        case 'stopped':
+          return '已停止';
+        case 'error':
+          return '下载出错';
+        default:
+          return data.status;
+      }
+    }
+
+    function stagePercent(data) {
+      if (data.stage === 'downloading') {
+        return data.total ? Math.round(data.completed * 100 / data.total) : 0;
+      }
+      if (data.stage === 'verifying') {
+        return data.total ? Math.round(data.verified * 100 / data.total) : 0;
+      }
+      if (data.stage === 'packaging' || data.stage === 'ready') return 100;
+      if (data.stage === 'stopped' || data.stage === 'error') {
+        return data.total ? Math.round(data.completed * 100 / data.total) : 0;
+      }
+      return 0;
+    }
+
+    function apply(data) {
+      totalCount.textContent = data.total;
+      completedCount.textContent = data.completed;
+      verifiedCount.textContent = data.verified;
+      unsignedCount.textContent = data.unsigned;
+      unsignedChip.style.display = data.unsigned ? '' : 'none';
+      renderProjects(data.projects);
+
+      stageText.textContent = stageLabel(data);
+      if (data.stage === 'downloading' || data.stage === 'verifying') {
+        stageDetail.textContent = (data.stage === 'downloading' ? data.completed : data.verified) + ' / ' + data.total;
+      } else {
+        stageDetail.textContent = '';
+      }
+      progressFill.style.width = stagePercent(data) + '%';
+      progressFill.className = 'progress-fill' + (data.stage === 'ready' || downloadTriggered ? ' done' : '');
+
+      if (data.zip_ready && data.zip_name) {
+        zipLine.style.display = '';
+        zipName.textContent = data.zip_name;
+      } else {
+        zipLine.style.display = 'none';
+      }
+
+      if (data.error) {
+        errorBox.style.display = '';
+        errorBox.textContent = data.error;
+      } else {
+        errorBox.style.display = 'none';
+      }
+
+      if (data.running) {
+        stopBtn.disabled = data.status === 'stopping';
+        stopBtn.textContent = data.status === 'stopping' ? '正在停止…' : '停止';
+      } else {
+        stopBtn.disabled = true;
+        stopBtn.textContent = data.status === 'done' ? '已完成' : '已停止';
+      }
+
+      gateBox.style.display = (!data.running && data.unsigned > 0) ? '' : 'none';
+      gateDownloadBtn.disabled = !ackCheck.checked;
+
+      var manualReady = !data.running && data.zip_ready && !data.auto_zip && data.unsigned === 0 && !downloadTriggered;
+      manualBox.style.display = manualReady ? '' : 'none';
+      if (manualReady) {
+        manualLink.href = data.zip_url;
+        manualLink.textContent = '下载 ' + (data.zip_name || 'zip');
+        manualHint.textContent = data.verify_skipped
+          ? '未检测到 deepin-deb-verify，已跳过验签；请手动下载。'
+          : '打包完成，请手动下载。';
+      }
+
+      if (!data.running && data.auto_zip && data.zip_ready && !autoTriggered) {
+        autoTriggered = true;
+        downloadTriggered = true;
+        stageText.textContent = '打包已完成，正在下载…';
+        window.location.href = data.zip_url;
+        setTimeout(function () {
+          stageText.textContent = '下载已完成';
+          stageDetail.textContent = '';
+        }, 1200);
+      }
+
+      if (downloadTriggered) {
+        stageText.textContent = '下载已完成';
+        stageDetail.textContent = '';
+        progressFill.style.width = '100%';
+        progressFill.className = 'progress-fill done';
+      }
+    }
+
+    async function poll() {
+      if (polling) return;
+      polling = true;
+      try {
+        var response = await fetch(statusUrl, { headers: { 'Accept': 'application/json' } });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        var data = await response.json();
+        apply(data);
+        if (data.running) setTimeout(poll, 800);
+      } catch (error) {
+        errorBox.style.display = '';
+        errorBox.textContent = '获取下载状态失败: ' + error.message;
+        setTimeout(poll, 1500);
+      } finally {
+        polling = false;
+      }
+    }
+
+    stopBtn.addEventListener('click', async function () {
+      stopBtn.disabled = true;
+      stopBtn.textContent = '正在停止…';
+      try {
+        await fetch(stopUrl, { method: 'POST' });
+      } catch (error) {
+        stopBtn.disabled = false;
+        stopBtn.textContent = '停止';
+        errorBox.style.display = '';
+        errorBox.textContent = '停止请求失败: ' + error.message;
+      }
+    });
+
+    ackCheck.addEventListener('change', function () {
+      gateDownloadBtn.disabled = !ackCheck.checked;
+    });
+
+    gateDownloadBtn.addEventListener('click', async function () {
+      if (!ackCheck.checked) return;
+      gateDownloadBtn.disabled = true;
+      gateDownloadBtn.textContent = '正在打包…';
+      try {
+        var body = new FormData();
+        body.append('ack', '1');
+        var response = await fetch(packageUrl, { method: 'POST', body: body });
+        var data = await response.json();
+        if (!response.ok || !data.zip_url) throw new Error(data.error || '打包失败');
+        downloadTriggered = true;
+        zipLine.style.display = '';
+        zipName.textContent = data.zip_name || '';
+        stageText.textContent = '下载已完成';
+        progressFill.style.width = '100%';
+        progressFill.className = 'progress-fill done';
+        window.location.href = data.zip_url;
+      } catch (error) {
+        errorBox.style.display = '';
+        errorBox.textContent = '打包失败: ' + error.message;
+        gateDownloadBtn.disabled = false;
+        gateDownloadBtn.textContent = '下载';
+      }
+    });
+
+    manualLink.addEventListener('click', function () {
+      downloadTriggered = true;
+      stageText.textContent = '下载已完成';
+      progressFill.style.width = '100%';
+      progressFill.className = 'progress-fill done';
+    });
+
+    poll();
+  })();
+</script>
+{% endblock %}

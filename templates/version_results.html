@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% block title %}检查结果 · {{ version.name }} · OEM 升级包中心{% endblock %}
+{% block content %}
+<header class="page">
+  <div>
+    <h1>检查结果 · {{ version.name }}</h1>
+    <p>按源码项目归总，一行一个项目；组内多仓库合并取最新版本。</p>
+  </div>
+  <div class="actions" style="margin-top:0">
+    <a class="btn" href="{{ url_for('version_detail', version_id=version.id) }}">返回版本</a>
+    <a class="btn" href="{{ url_for('index') }}">主页</a>
+  </div>
+</header>
+
+<div class="chips">
+  <span class="chip">配置架构 <strong>{{ version.arch }}</strong></span>
+  {% for item in payload.arches %}
+  <span class="chip">{{ item.arch }} 基线 <strong>{{ item.base_count }}</strong>{% if item.error %} <span style="color:var(--error)">失败</span>{% endif %}</span>
+  {% endfor %}
+  <span class="chip">可升级包 <strong>{{ total_packages }}</strong></span>
+  {% if payload.filters %}<span class="chip">过滤 <strong>{{ payload.filters|join(', ') }}</strong></span>{% endif %}
+</div>
+
+{% if errors %}
+<div class="box error">
+  <h3>部分架构或仓库检查失败</h3>
+  <ul>{% for item in errors %}<li>{{ item }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+{% if total_packages %}
+<form method="post" action="{{ url_for('version_download_all', version_id=version.id, check_id=check_id) }}">
+  {% for group in payload.groups %}
+  {% set group_index = loop.index0 %}
+  <details class="repo-card" open>
+    <summary class="repo-head">
+      <div class="repo-summary">
+        {% if group.merged_projects %}
+        <input type="checkbox" class="repo-check" checked
+               title="勾选/取消本组全部项目" aria-label="选择本组全部项目">
+        {% endif %}
+        <span class="name">{{ group.name }}</span>
+        <span class="chip">项目 <strong>{{ group.merged_projects|length }}</strong></span>
+        <span class="chip">包 <strong>{{ group.package_count }}</strong></span>
+        <span class="chip">仓库 <strong>{{ group.repos|length }}</strong></span>
+        {% for item in payload.arches %}
+          {% set info = group.merged_by_arch.get(item.arch) %}
+          {% if info and info.upgrades %}<span class="chip">{{ item.arch }} <strong>{{ info.upgrades|length }}</strong></span>{% endif %}
+        {% endfor %}
+      </div>
+    </summary>
+
+    <div class="repo-body">
+      {% if group.repo_errors %}
+      <div class="box error" style="margin-bottom:10px">
+        {% for item in group.repo_errors %}<div>{{ item }}</div>{% endfor %}
+      </div>
+      {% endif %}
+
+      {% if group.merged_projects %}
+      <table>
+        <thead>
+          <tr>
+            <th class="check-col"></th>
+            <th>项目</th><th>包列表</th><th>版本变更</th>
+            <th>可升级架构</th><th class="num">大小</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for project in group.merged_projects %}
+          <tr>
+            <td class="check-col">
+              <input type="checkbox" class="project-check" name="group_projects" checked
+                     value="{{ group_index }}:{{ project.name }}"
+                     data-package-count="{{ project.packages|length }}"
+                     aria-label="选择项目 {{ project.name }}">
+            </td>
+            <td class="mono"><strong>{{ project.name }}</strong></td>
+            <td class="mono" style="font-size:12px">
+              {% for package in project.packages %}<div>{{ package.name }}</div>{% endfor %}
+            </td>
+            <td class="mono" style="font-size:12px; white-space:nowrap">
+              <span class="version-old">{{ project.base_versions|join(' / ') }}</span>
+              <span class="version-arrow">→</span>
+              <span class="version-new">{{ project.versions|join(' / ') }}</span>
+            </td>
+            <td class="mono">{{ project.arches|join(', ') }}</td>
+            <td class="num">{{ project.size|filesize }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="muted" style="margin:0">该仓库组没有可升级的包。</p>
+      {% endif %}
+    </div>
+  </details>
+  {% endfor %}
+
+  <div class="panel" style="display:flex; justify-content:flex-end; align-items:center; gap:12px; flex-wrap:wrap;">
+    <span class="muted" id="selectionCount"></span>
+    <select name="arch" style="width:auto; min-width:130px;">
+      <option value="all">全部架构</option>
+      {% for item in payload.arches if not item.error %}
+      <option value="{{ item.arch }}">{{ item.arch }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="primary">下载</button>
+  </div>
+</form>
+{% elif not errors %}
+<div class="empty">所有仓库都没有可升级的包。</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (function () {
+    var projectBoxes = Array.prototype.slice.call(
+      document.querySelectorAll('input[name="group_projects"]')
+    );
+    var counter = document.getElementById('selectionCount');
+
+    function updateCount() {
+      if (!counter) return;
+      var selected = projectBoxes.filter(function (box) { return box.checked; });
+      var packageCount = selected.reduce(function (total, box) {
+        return total + Number(box.getAttribute('data-package-count') || 0);
+      }, 0);
+      counter.textContent =
+        '已选 ' + selected.length + ' / ' + projectBoxes.length +
+        ' 个项目，共 ' + packageCount + ' 个包';
+    }
+
+    document.querySelectorAll('details.repo-card').forEach(function (card) {
+      var repoCheck = card.querySelector('.repo-check');
+      var boxes = Array.prototype.slice.call(
+        card.querySelectorAll('input[name="group_projects"]')
+      );
+
+      function syncRepo() {
+        var selected = boxes.filter(function (box) { return box.checked; }).length;
+        if (repoCheck) {
+          repoCheck.checked = boxes.length > 0 && selected === boxes.length;
+          repoCheck.indeterminate = selected > 0 && selected < boxes.length;
+        }
+        updateCount();
+      }
+
+      if (repoCheck) {
+        repoCheck.addEventListener('click', function (event) {
+          event.stopPropagation();
+        });
+        repoCheck.addEventListener('change', function () {
+          boxes.forEach(function (box) { box.checked = repoCheck.checked; });
+          syncRepo();
+        });
+      }
+      boxes.forEach(function (box) {
+        box.addEventListener('change', syncRepo);
+      });
+      syncRepo();
+    });
+
+    updateCount();
+  })();
+</script>
+{% endblock %}

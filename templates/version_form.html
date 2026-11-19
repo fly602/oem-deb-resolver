@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}{{ '编辑版本' if mode == 'edit' else '新增版本' }} · OEM 升级包中心{% endblock %}
+{% block content %}
+<header class="page">
+  <div>
+    <h1>{{ '编辑版本' if mode == 'edit' else '新增版本' }}</h1>
+    <p>填写基线清单地址，并按自定义名称添加补丁仓库组；每组可放多个仓库。</p>
+  </div>
+  <div class="actions" style="margin-top:0">
+    <a class="btn" href="{% if version %}{{ url_for('version_detail', version_id=version.id) }}{% else %}{{ url_for('index') }}{% endif %}">返回</a>
+    <a class="btn" href="{{ url_for('index') }}">主页</a>
+  </div>
+</header>
+
+{% if error %}
+<div class="box error"><h3>无法保存</h3><p>{{ error }}</p></div>
+{% endif %}
+
+<form class="panel" id="versionForm" method="post" action="{{ action }}">
+  <div class="row">
+    <div class="field">
+      <label class="title" for="name">版本名称</label>
+      <input type="text" id="name" name="name" required value="{{ form.name }}" placeholder="如 2500u1、2500u2">
+    </div>
+    <div class="field">
+      <label class="title" for="architecture">目标架构</label>
+      <select id="architecture" name="architecture">
+        {% for arch in arches %}
+        <option value="{{ arch }}" {% if form.arch == arch %}selected{% endif %}>{{ arch }}</option>
+        {% endfor %}
+        <option value="all" {% if form.arch == 'all' %}selected{% endif %}>all（全部架构）</option>
+      </select>
+      <p class="hint" id="archHint"></p>
+    </div>
+  </div>
+
+  <div class="field">
+    <label class="title" for="base_list">基线仓库/清单地址</label>
+    <input type="text" id="base_list" name="base_list" required value="{{ form.base_list }}"
+           placeholder="https://cdimage.uniontech.com/.../20260803-stable/ 或 .../report/iso-package-list/xxxx.txt">
+    <p class="hint">可填发布根目录、清单目录、任意 <code>.../report/iso-package-list/xxxx.txt</code> 或已存在的本地文件；工具会按架构自动定位 <code>packages-full-&lt;isoarch&gt;.txt</code>，找不到时先校验地址本身是否有效。</p>
+  </div>
+
+  <div class="field">
+    <label class="title">补丁仓库组</label>
+    <p class="hint" style="margin-top:0">每组一个自定义名称（如 dde、系统、窗管），组内每行一个 sources.list 仓库。检查时逐个仓库统计。</p>
+    <div id="groups">
+      {% for group in form.groups %}
+      <div class="group-row">
+        <div class="group-head">
+          <input type="text" name="group_name" value="{{ group.name }}" placeholder="组名，如 dde / 系统 / 窗管">
+          <button type="button" class="btn danger remove-group">删除</button>
+        </div>
+        <textarea name="group_repos" placeholder="deb [trusted=yes] https://aptly.example.com/pkg/xxx unstable main">{{ group.repos }}</textarea>
+      </div>
+      {% endfor %}
+    </div>
+    <button type="button" id="addGroup" class="btn">+ 添加仓库组</button>
+  </div>
+
+</form>
+
+<div class="actions split">
+  <button type="submit" form="versionForm" class="primary">保存</button>
+  {% if version %}
+  <form method="post" action="{{ url_for('version_delete', version_id=version.id) }}"
+        onsubmit="return confirm('确定删除版本 {{ version.name }} 及其检查缓存？');">
+    <button type="submit" class="btn danger">删除版本</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (function () {
+    var archMap = {
+      'x86_64': 'amd64', 'amd64': 'amd64',
+      'aarch64': 'arm64', 'arm64': 'arm64',
+      'loongarch64': 'loong64', 'loong64': 'loong64',
+      'sw_64': 'sw64', 'sw64': 'sw64',
+      'mips64el': 'mips64el'
+    };
+    var baseInput = document.getElementById('base_list');
+    var archSelect = document.getElementById('architecture');
+    var archHint = document.getElementById('archHint');
+
+    function detectArch(value) {
+      var name = (value || '').trim().split('/').pop().toLowerCase();
+      if (!name.endsWith('.txt')) return '';
+      var match = name.match(/packages-full-([a-z0-9_]+)\.txt$/);
+      var token = match ? match[1] : '';
+      if (!token) {
+        var suffix = name.match(/[-_](x86_64|aarch64|loongarch64|sw_64|mips64el)\.txt$/);
+        token = suffix ? suffix[1] : '';
+      }
+      return archMap[token] || '';
+    }
+
+    function syncArch() {
+      var arch = detectArch(baseInput.value);
+      if (arch) {
+        archSelect.value = arch;
+        archHint.textContent = '已根据基线文件名自动识别架构：' + arch;
+      } else {
+        archHint.textContent = '';
+      }
+    }
+
+    baseInput.addEventListener('input', syncArch);
+    syncArch();
+
+    var container = document.getElementById('groups');
+    document.getElementById('addGroup').addEventListener('click', function () {
+      var row = document.createElement('div');
+      row.className = 'group-row';
+      row.innerHTML =
+        '<div class="group-head">' +
+        '<input type="text" name="group_name" placeholder="组名，如 dde / 系统 / 窗管">' +
+        '<button type="button" class="btn danger remove-group">删除</button>' +
+        '</div>' +
+        '<textarea name="group_repos" placeholder="deb [trusted=yes] https://aptly.example.com/pkg/xxx unstable main"></textarea>';
+      container.appendChild(row);
+      row.querySelector('input').focus();
+    });
+    container.addEventListener('click', function (event) {
+      if (event.target.classList.contains('remove-group')) {
+        var rows = container.querySelectorAll('.group-row');
+        if (rows.length <= 1) {
+          rows[0].querySelector('input').value = '';
+          rows[0].querySelector('textarea').value = '';
+          return;
+        }
+        event.target.closest('.group-row').remove();
+      }
+    });
+  })();
+</script>
+{% endblock %}

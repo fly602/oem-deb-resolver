@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}{{ version.name }} · OEM 升级包中心{% endblock %}
+{% block content %}
+<header class="page">
+  <div>
+    <h1>{{ version.name }}</h1>
+    <p>版本配置 · 基线清单 {{ display_arch }} 架构{% if detected_arch %}（由基线文件名自动识别）{% endif %} · {{ version.groups|length }} 个仓库组 / {{ repo_count }} 个仓库</p>
+  </div>
+  <div class="actions" style="margin-top:0">
+    <a class="btn" href="{{ url_for('index') }}">返回</a>
+    <a class="btn" href="{{ url_for('index') }}">主页</a>
+  </div>
+</header>
+
+<div class="panel">
+  <h2 style="margin-top:0">基线清单</h2>
+  <p class="mono" style="margin-top:0; word-break:break-all">{{ version.base_list }}</p>
+  <button type="button" class="btn" id="btnValidateBaseline">检查有效性</button>
+  <div id="baselineResult" class="inline-check"></div>
+</div>
+
+<div class="panel">
+  <h2 style="margin-top:0">补丁仓库</h2>
+  {% for group in version.groups %}
+  <div class="group-block">
+    <h3>{{ group.name }} · {{ group.repos|length }} 个仓库</h3>
+    <pre class="repos">{% for repo in group.repos %}{{ repo }}
+{% endfor %}</pre>
+  </div>
+  {% endfor %}
+  <button type="button" class="btn" id="btnValidateRepos">检查有效性</button>
+  <div id="reposResult" class="inline-check"></div>
+</div>
+
+<div class="actions split">
+  <form method="post" action="{{ url_for('version_check', version_id=version.id) }}">
+    <button type="submit" class="primary">检查更新</button>
+  </form>
+  <a class="btn" href="{{ url_for('version_edit', version_id=version.id) }}">编辑配置</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (function () {
+    var urls = {
+      baseline: "{{ url_for('version_validate_baseline', version_id=version.id) }}",
+      repos: "{{ url_for('version_validate_repos', version_id=version.id) }}"
+    };
+
+    function makeCell(text, className) {
+      var cell = document.createElement('td');
+      cell.textContent = text;
+      if (className) cell.className = className;
+      return cell;
+    }
+
+    function renderChecks(box, data, columns) {
+      box.textContent = '';
+      var table = document.createElement('table');
+      var head = document.createElement('thead');
+      var headRow = document.createElement('tr');
+      columns.forEach(function (column) {
+        var th = document.createElement('th');
+        th.textContent = column;
+        headRow.appendChild(th);
+      });
+      head.appendChild(headRow);
+      table.appendChild(head);
+
+      var body = document.createElement('tbody');
+      data.checks.forEach(function (check) {
+        var row = document.createElement('tr');
+        var archCell = makeCell(check.arch, 'mono');
+        if (check.subtitle) archCell.title = check.subtitle;
+        row.appendChild(archCell);
+        if (data.kind === 'repos') {
+          row.appendChild(makeCell(check.title, ''));
+          row.appendChild(makeCell(check.subtitle, 'mono'));
+        }
+        var result = document.createElement('td');
+        var mark = document.createElement('span');
+        mark.className = check.ok ? 'ok-text' : 'err-text';
+        mark.textContent = (check.ok ? '✓ ' : '✗ ') + check.message;
+        result.appendChild(mark);
+        row.appendChild(result);
+        body.appendChild(row);
+      });
+      table.appendChild(body);
+      box.appendChild(table);
+    }
+
+    async function run(button, box, url, columns) {
+      button.disabled = true;
+      box.innerHTML = '<p class="hint">检查中…</p>';
+      try {
+        var response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Accept': 'application/json' }
+        });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        var data = await response.json();
+        renderChecks(box, data, columns);
+      } catch (error) {
+        box.textContent = '';
+        var failure = document.createElement('div');
+        failure.className = 'box error';
+        failure.textContent = '检查请求失败: ' + error.message;
+        box.appendChild(failure);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    var baselineButton = document.getElementById('btnValidateBaseline');
+    var reposButton = document.getElementById('btnValidateRepos');
+    baselineButton.addEventListener('click', function () {
+      run(baselineButton, document.getElementById('baselineResult'), urls.baseline, ['架构', '结果']);
+    });
+    reposButton.addEventListener('click', function () {
+      run(reposButton, document.getElementById('reposResult'), urls.repos, ['架构', '仓库组', '仓库', '结果']);
+    });
+  })();
+</script>
+{% endblock %}

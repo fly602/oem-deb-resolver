@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}OEM 升级包中心{% endblock %}</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='icon.svg') }}">
+  <style>
+    :root {
+      --bg: #f6f7f9; --surface: #fff; --border: #e3e6ea; --text: #1f2328;
+      --muted: #656d76; --accent: #2563eb; --accent-soft: #eff6ff;
+      --error: #b42318; --error-soft: #fef3f2; --ok: #067647; --ok-soft: #ecfdf3;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 40px 20px; background: var(--bg); color: var(--text);
+      font: 15px/1.6 -apple-system, "Segoe UI", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+    }
+    main { max-width: 1100px; margin: 0 auto; }
+    a { color: var(--accent); }
+    .muted { color: var(--muted); }
+    header.page {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 16px; flex-wrap: wrap; margin-bottom: 22px;
+    }
+    header.page h1 { margin: 0 0 4px; font-size: 25px; letter-spacing: -0.02em; }
+    header.page p { margin: 0; color: var(--muted); }
+    h2 { margin: 28px 0 12px; font-size: 18px; }
+    h3 { margin: 18px 0 8px; font-size: 15px; }
+    .btn, button, a.button {
+      display: inline-block; padding: 9px 18px; border: 1px solid var(--border);
+      border-radius: 8px; background: var(--surface); color: var(--text);
+      font: inherit; font-weight: 600; font-size: 14px; cursor: pointer;
+      text-decoration: none;
+    }
+    .btn:hover, button:hover, a.button:hover { background: #f3f4f6; }
+    .btn.primary, button.primary {
+      background: var(--accent); border-color: var(--accent); color: #fff;
+    }
+    .btn.primary:hover, button.primary:hover { filter: brightness(0.94); background: var(--accent); }
+    .btn.danger, button.danger { color: var(--error); border-color: #fda29b; background: #fff; }
+    .btn.danger:hover, button.danger:hover { background: var(--error-soft); }
+    .btn.sm { padding: 6px 12px; font-size: 13px; font-weight: 500; }
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .brand-icon { width: 52px; height: 52px; flex: none; margin-top: 0; }
+    .brand-kicker { margin-bottom: 2px; color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+    .site-footer { max-width: 1100px; margin: 38px auto 0; padding-top: 18px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12.5px; text-align: center; }
+    .site-footer a { color: var(--muted); text-decoration: none; }
+    .site-footer a:hover { color: var(--accent); }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 20px; }
+    .actions.split { justify-content: space-between; align-items: center; }
+    .actions.split > * { margin: 0; }
+    .ok-text { color: var(--ok); font-weight: 600; }
+    .err-text { color: var(--error); font-weight: 600; }
+    .inline-check { margin-top: 14px; }
+    .panel {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 24px; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); margin-bottom: 18px;
+    }
+    .panel > :first-child { margin-top: 0; }
+    .panel > :last-child { margin-bottom: 0; }
+    .field { margin-bottom: 20px; }
+    .field:last-child { margin-bottom: 0; }
+    label.title { display: block; font-weight: 600; margin-bottom: 7px; }
+    input[type=text], select, textarea {
+      width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+      background: #fff; color: var(--text); font: inherit;
+    }
+    textarea { min-height: 96px; resize: vertical; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 13px; }
+    input[type=text]:focus, select:focus, textarea:focus {
+      outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    .row { display: grid; grid-template-columns: 200px 1fr; gap: 20px; }
+    .hint { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+    code, .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 13px; }
+    code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; }
+    pre.repos { margin: 6px 0 0; padding: 12px 14px; background: #fafbfc; border: 1px solid var(--border); border-radius: 8px; white-space: pre-wrap; word-break: break-all; font-size: 12.5px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+    .chip { background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 5px 14px; font-size: 13px; color: var(--muted); }
+    .chip strong { color: var(--text); }
+    .box { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 18px; }
+    .box.error, .box.ok { border-radius: 10px; }
+    .box.error { background: var(--error-soft); border-color: #fda29b; color: var(--error); }
+    .box.error h2, .box.error h3 { margin: 0 0 6px; color: var(--error); font-size: 15px; }
+    .box.error ul { margin: 0; padding-left: 20px; }
+    .box.ok { background: var(--ok-soft); border-color: #abefc6; color: var(--ok); }
+    .empty { padding: 30px; text-align: center; color: var(--muted); background: var(--surface); border: 1px dashed var(--border); border-radius: 12px; }
+    table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+    th, td { padding: 9px 12px; border-bottom: 1px solid var(--border); text-align: left; font-size: 13.5px; }
+    th { background: #fafbfc; color: var(--muted); font-weight: 600; white-space: nowrap; }
+    tr:last-child td { border-bottom: 0; }
+    td.num, th.num { text-align: right; white-space: nowrap; }
+    .repo-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; margin-bottom: 14px; }
+    .repo-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+    details.repo-card { padding: 0; }
+    details.repo-card > summary.repo-head { padding: 15px 18px; margin: 0; cursor: pointer; list-style: none; }
+    details.repo-card > summary.repo-head::-webkit-details-marker { display: none; }
+    details.repo-card > summary.repo-head { justify-content: flex-start; gap: 10px; }
+    details.repo-card > summary.repo-head::before { content: "▸"; color: var(--muted); margin-right: 2px; }
+    details.repo-card[open] > summary.repo-head::before { content: "▾"; }
+    details.repo-card[open] > summary.repo-head { border-bottom: 1px solid var(--border); }
+    .repo-body { padding: 14px 18px 16px; }
+    .repo-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .repo-check, .pkg-check { width: 17px; height: 17px; margin: 0; flex: none; cursor: pointer; }
+    .check-col { width: 34px; text-align: center; }
+    .pkg-line { display: flex; gap: 12px; justify-content: space-between; align-items: baseline; }
+    .version-old { color: var(--muted); }
+    .version-new { color: var(--accent); font-weight: 600; }
+    .version-arrow { color: var(--muted); }
+    .project-check { width: 17px; height: 17px; margin: 0; flex: none; cursor: pointer; }
+    .repo-head .name { font-weight: 600; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 13.5px; }
+    .repo-head form { margin: 0; }
+    details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+    .group-block { margin-bottom: 28px; }
+    .group-block > h3 { margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+    .group-row { border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 12px; background: #fafbfc; }
+    .group-head { display: flex; gap: 10px; margin-bottom: 8px; }
+    .group-head input { flex: 1; }
+    .group-head button { flex: none; }
+    .inline-form { display: inline; margin: 0; }
+    {% block style %}{% endblock %}
+  </style>
+</head>
+<body>
+<main>
+  {% block content %}{% endblock %}
+</main>
+<footer class="site-footer">
+  Powered by fuleyi · <a href="mailto:fuleyi@uniontech.com">fuleyi@uniontech.com</a>
+</footer>
+{% block scripts %}{% endblock %}
+</body>
+</html>

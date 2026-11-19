@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>下载完成 · OEM 升级包中心</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='icon.svg') }}">
+  <style>
+    :root {
+      --bg: #f6f7f9; --surface: #fff; --border: #e3e6ea; --text: #1f2328;
+      --muted: #656d76; --accent: #2563eb; --error: #b42318; --error-soft: #fef3f2; --ok: #067647;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 40px 20px; background: var(--bg); color: var(--text);
+      font: 15px/1.6 -apple-system, "Segoe UI", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+    }
+    main { max-width: 820px; margin: 0 auto; }
+    h1 { margin: 0 0 6px; font-size: 24px; }
+    p { color: var(--muted); }
+    .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 28px; margin-top: 20px; }
+    .stats { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 22px; }
+    .chip { background: #f3f4f6; border: 1px solid var(--border); border-radius: 999px; padding: 5px 14px; font-size: 13px; color: var(--muted); }
+    .chip strong { color: var(--text); }
+    a.button {
+      display: inline-block; padding: 12px 26px; border-radius: 8px; background: var(--accent);
+      color: #fff; font-weight: 600; text-decoration: none;
+    }
+    a.button:hover { filter: brightness(0.94); }
+    .box.error { background: var(--error-soft); border: 1px solid #fda29b; color: var(--error); border-radius: 10px; padding: 14px 18px; margin-top: 20px; }
+    .box.error h2 { margin: 0 0 6px; font-size: 15px; }
+    .box.error ul { margin: 0; padding-left: 20px; font-size: 13px; }
+    .box.notice { background: #fffaeb; border: 1px solid #fedf89; color: #b54708; border-radius: 10px; padding: 14px 18px; margin-top: 18px; }
+    .topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
+    .topbar header p { margin-bottom: 0; }
+    .top-actions { display: flex; gap: 8px; }
+    .top-actions a { padding: 9px 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); text-decoration: none; font-weight: 600; font-size: 14px; }
+    .top-actions a:hover { background: #f3f4f6; }
+    h2 { margin: 26px 0 10px; font-size: 17px; }
+    .file-list { border: 1px solid var(--border); border-radius: 10px; overflow: auto; max-height: 440px; background: var(--surface); }
+    .file-list table { width: 100%; border-collapse: collapse; }
+    .file-list th, .file-list td { padding: 7px 11px; border-bottom: 1px solid var(--border); text-align: left; font-size: 12.5px; }
+    .file-list th { background: #fafbfc; color: var(--muted); position: sticky; top: 0; }
+    .file-list tr:last-child td { border-bottom: 0; }
+    .file-list .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; word-break: break-all; }
+    .file-list .ok-text { color: var(--ok); font-weight: 600; }
+    .file-list .err-text { color: var(--error); font-weight: 600; }
+    .file-list .detail { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+    .file-list .detail.error { color: var(--error); }
+    .file-list .num { text-align: right; white-space: nowrap; }
+  </style>
+</head>
+<body>
+<main>
+  <div class="topbar">
+    <div>
+      <h1>下载完成</h1>
+      <p>zip 内含 deb 包、<code>manifest.tsv</code> 与 <code>SHA256SUMS</code>。</p>
+    </div>
+    <div class="top-actions">
+      <a href="{{ back_url|default(url_for('index'), true) }}">返回</a>
+      <a href="{{ url_for('index') }}">主页</a>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="stats">
+      <span class="chip">架构 <strong>{{ arches|join(', ') }}</strong></span>
+      <span class="chip">包 <strong>{{ file_count }}</strong></span>
+      <span class="chip">新下载 <strong>{{ downloaded }}</strong></span>
+      <span class="chip">已存在 <strong>{{ cached }}</strong></span>
+      <span class="chip">zip 大小 <strong>{{ total_size|filesize }}</strong></span>
+      {% if verification %}
+      <span class="chip">验签通过 <strong>{{ verification.passed }}</strong></span>
+      {% if verification.failed %}<span class="chip" style="color:var(--error)">验签失败 <strong>{{ verification.failed }}</strong></span>{% endif %}
+      {% endif %}
+    </div>
+    <a class="button" href="/zip/{{ preview_id }}.zip">保存 upgrade-debs-{{ preview_id }}.zip</a>
+  </div>
+
+  {% if verification and not verification.available %}
+  <div class="box notice">未检测到 <code>deepin-deb-verify</code>，已跳过 deb 验签。</div>
+  {% endif %}
+
+  {% if verification and verification.files %}
+  <h2>下载列表</h2>
+  <div class="file-list">
+    <table>
+      <thead>
+        <tr><th>文件</th><th class="num">大小</th><th>验签结果</th></tr>
+      </thead>
+      <tbody>
+        {% for file in verification.files %}
+        <tr>
+          <td class="mono">{{ file.name }}</td>
+          <td class="num">{{ file.size|filesize }}</td>
+          <td>
+            {% if file.status == 'ok' %}
+            <span class="ok-text">✓ 通过</span>
+            {% elif file.status == 'skipped' %}
+            <span style="color:var(--muted)">— 跳过</span>
+            {% else %}
+            <span class="err-text">✗ 失败</span>
+            {% endif %}
+            {% if file.detail %}<div class="detail{% if file.status == 'failed' %} error{% endif %}">{{ file.detail }}</div>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if failures %}
+  <div class="box error">
+    <h2>以下包下载失败</h2>
+    <ul>{% for item in failures %}<li>{{ item }}</li>{% endfor %}</ul>
+    <p>zip 中不包含失败项。可返回预览页重试。</p>
+  </div>
+  {% endif %}
+
+</main>
+<footer class="site-footer">
+  Powered by fuleyi · <a href="mailto:fuleyi@uniontech.com">fuleyi@uniontech.com</a>
+</footer>
+</body>
+</html>
