@@ -11,9 +11,15 @@ import json
 import os
 import re
 import shutil
+import importlib.metadata
+import io
+import ipaddress
+import socket
 import subprocess
+import sys
 import threading
 import time
+import urllib.request
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -54,6 +60,17 @@ VERSION_CACHE = CACHE_DIR / "versions"
 JOB_DIR = CACHE_DIR / "jobs"
 DATA_DIR = WORKDIR / "config"
 VERSIONS_FILE = DATA_DIR / "versions.json"
+VERSION_FILE = WORKDIR / "VERSION"
+APP_VERSION = (
+    VERSION_FILE.read_text(encoding="utf-8").strip()
+    if VERSION_FILE.is_file()
+    else "0.0.0"
+)
+DEFAULT_UPDATE_URLS = (
+    "https://github.com/fly602/oem-deb-resolver/raw/main/VERSION",
+    "https://github.com/fly602/oem-deb-resolver/raw/refactor/simplified-fetch/VERSION",
+)
+GITHUB_URL = "https://github.com/fly602/oem-deb-resolver"
 
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
@@ -679,6 +696,151 @@ def version_validate_repos(version_id: str):
     )
 
 
+
+def _merge_version_config(existing: dict, imported: dict) -> dict:
+    """同名版本合并：保留现有配置，只追加缺失的仓库组和仓库。"""
+    merged = dict(existing)
+    for key in ("name", "base_list", "arch", "created_at"):
+        if not merged.get(key) and imported.get(key):
+            merged[key] = imported[key]
+
+    groups: list[dict] = []
+    group_index: dict[str, dict] = {}
+    for group in existing.get("groups", []):
+        copy = {
+            "name": group["name"],
+            "repos": list(dict.fromkeys(group.get("repos", []))),
+        }
+        groups.append(copy)
+        group_index[copy["name"]] = copy
+    for group in imported.get("groups", []):
+        target = group_index.get(group["name"])
+        if target is None:
+            target = {"name": group["name"], "repos": []}
+            groups.append(target)
+            group_index[group["name"]] = target
+        for repo in group["repos"]:
+            if repo not in target["repos"]:
+                target["repos"].append(repo)
+    merged["groups"] = groups
+    return merged
+
+
+def _parse_imported_versions(payload) -> list[dict]:
+    if isinstance(payload, dict) and isinstance(payload.get("versions"), list):
+        items = payload["versions"]
+    elif isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        items = [payload]
+    else:
+        raise ValueError("配置格式无效：需要 versions 数组或版本对象")
+    if not items:
+        raise ValueError("配置中没有版本")
+
+    versions: list[dict] = []
+    for index, raw in enumerate(items, 1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"第 {index} 个版本不是对象")
+        name = str(raw.get("name", "")).strip()
+        base_list = str(raw.get("base_list", "")).strip()
+        if not name:
+            raise ValueError(f"第 {index} 个版本缺少 name")
+        if not base_list:
+            raise ValueError(f"版本 {name} 缺少 base_list")
+        try:
+            arch = normalize_arch(str(raw.get("arch", "amd64")))
+        except ValueError as exc:
+            raise ValueError(f"版本 {name}: {exc}") from exc
+        detected = detect_arch_from_baseline(base_list)
+        if detected:
+            arch = detected
+
+        groups_raw = raw.get("groups")
+        if not isinstance(groups_raw, list) or not groups_raw:
+            raise ValueError(f"版本 {name} 缺少仓库组")
+        groups: list[dict] = []
+        for group_index, group in enumerate(groups_raw, 1):
+            if not isinstance(group, dict):
+                raise ValueError(f"版本 {name} 第 {group_index} 个仓库组格式错误")
+            group_name = str(group.get("name", "")).strip()
+            repos_raw = group.get("repos", [])
+            if isinstance(repos_raw, str):
+                repos_raw = repos_raw.splitlines()
+            if not isinstance(repos_raw, list):
+                raise ValueError(f"版本 {name} 仓库组 {group_name} 的 repos 格式错误")
+            repos = [str(repo).strip() for repo in repos_raw if str(repo).strip()]
+            if not group_name or not repos:
+                raise ValueError(f"版本 {name} 第 {group_index} 个仓库组缺少名称或仓库")
+            for repo in repos:
+                parse_repo_spec(repo)
+            groups.append({"name": group_name, "repos": repos})
+
+        version_id = re.sub(
+            r"[^A-Za-z0-9._-]+", "-", str(raw.get("id", "")).strip()
+        ).strip("-._")
+        if not version_id:
+            version_id = _ascii_slug(name, "version")
+        versions.append(
+            {
+                "id": version_id,
+                "name": name,
+                "base_list": base_list,
+                "arch": arch,
+                "groups": groups,
+                "created_at": str(
+                    raw.get("created_at")
+                    or datetime.now(timezone.utc).isoformat(timespec="seconds")
+                ),
+            }
+        )
+    return versions
+
+
+@app.route("/versions/import", methods=["GET", "POST"])
+def version_import():
+    error = ""
+    result = None
+    if request.method == "POST":
+        raw_text = ""
+        upload = request.files.get("config_file")
+        if upload and upload.filename:
+            try:
+                raw_text = upload.read().decode("utf-8")
+            except UnicodeDecodeError:
+                error = "配置文件不是 UTF-8 文本"
+        if not error and not raw_text:
+            raw_text = request.form.get("json_text", "").strip()
+        if not error and not raw_text:
+            error = "请选择 versions.json 文件或粘贴配置内容"
+        if not error:
+            try:
+                imported = _parse_imported_versions(json.loads(raw_text))
+            except json.JSONDecodeError as exc:
+                error = f"JSON 解析失败: {exc}"
+            except ValueError as exc:
+                error = str(exc)
+        if not error:
+            versions = _load_versions()
+            added = updated = 0
+            names: list[str] = []
+            for item in imported:
+                existing = next(
+                    (version for version in versions if version["id"] == item["id"]),
+                    None,
+                )
+                if existing is None:
+                    versions.append(item)
+                    added += 1
+                else:
+                    existing.update(_merge_version_config(existing, item))
+                    updated += 1
+                names.append(item["name"])
+            _save_versions(versions)
+            result = {"added": added, "updated": updated, "names": names}
+    return render_template("version_import.html", error=error, result=result)
+
+
 # ─── 版本检查与下载 ────────────────────────────────────────────────────────────
 
 
@@ -977,6 +1139,7 @@ def version_download_all(version_id: str, check_id: str):
         "id": job_id,
         "version_id": version_id,
         "version_name": version["name"],
+        "version_config": dict(version),
         "check_id": check_id,
         "arch": arch,
         "status": "running",
@@ -1060,15 +1223,104 @@ def _write_job_manifests(job: dict, root: Path) -> None:
                 handle.write(f"{task['sha256']}  {task['basename']}\n")
 
 
+_DOWNLOAD_LABELS = {
+    "pending": "未开始",
+    "downloading": "下载中",
+    "ok": "完成",
+    "cached": "已存在",
+    "failed": "失败",
+}
+_VERIFY_LABELS = {
+    "pending": "未验签",
+    "ok": "通过",
+    "failed": "未签名",
+    "skipped": "跳过",
+}
+
+
+def _write_job_export(job: dict, root: Path, timestamp: str) -> None:
+    """写入可直接导入的版本配置、打包时间与版本对比信息。"""
+    tasks = job["tasks"]
+    config = job.get("version_config") or {}
+    (root / "versions.json").write_text(
+        json.dumps(
+            {"schema": 1, "versions": [config] if config else []},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    projects = {
+        (task["group_index"], task["repo_index"], task["project"])
+        for task in tasks
+    }
+    packages = {
+        (
+            task["group_index"],
+            task["repo_index"],
+            task["project"],
+            task["name"],
+        )
+        for task in tasks
+    }
+    downloaded = sum(1 for task in tasks if task["download"] in ("ok", "cached"))
+    unsigned = sum(1 for task in tasks if task["verify"] == "failed")
+    skipped = sum(1 for task in tasks if task["verify"] == "skipped")
+
+    lines = [
+        f"版本: {job.get('version_name', '')}",
+        f"架构: {config.get('arch', job.get('arch', ''))}",
+        f"打包时间: {timestamp}",
+        f"基线清单: {config.get('base_list', '')}",
+        "仓库组:",
+    ]
+    for group in config.get("groups", []):
+        lines.append(f"  {group.get('name', '')}:")
+        for repo in group.get("repos", []):
+            lines.append(f"    - {repo}")
+    lines.extend(
+        [
+            f"项目数: {len(projects)}",
+            f"包数: {len(packages)}",
+            f"文件数: {len(tasks)}",
+            f"下载成功: {downloaded}",
+            f"未签名: {unsigned}",
+            f"验签跳过: {skipped}",
+        ]
+    )
+    (root / "info.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rows = sorted(
+        tasks,
+        key=lambda task: (task["project"], task["name"], task["arch"]),
+    )
+    with (root / "comparison.tsv").open("w", encoding="utf-8", newline="") as handle:
+        handle.write(
+            "项目\t包名\t架构\t基础版本\t升级版本\t大小\tSHA256\t文件名"
+            "\t下载状态\t验签状态\n"
+        )
+        for task in rows:
+            handle.write(
+                f"{task['project']}\t{task['name']}\t{task['arch']}\t"
+                f"{task['base_version']}\t{task['version']}\t{task['size']}\t"
+                f"{task['sha256']}\t{task['basename']}\t"
+                f"{_DOWNLOAD_LABELS.get(task['download'], task['download'])}\t"
+                f"{_VERIFY_LABELS.get(task['verify'], task['verify'])}\n"
+            )
+
+
 def _package_job(job: dict) -> None:
     with job["package_lock"]:
         if job.get("zip_ready"):
             return
         root = Path(job["root"])
         _write_job_manifests(job, root)
+        now = datetime.now()
+        timestamp = now.strftime("%Y%m%d-%H%M%S")
+        _write_job_export(job, root, now.strftime("%Y-%m-%d %H:%M:%S"))
         zip_path = JOB_DIR / f"{job['id']}.zip"
         _zip_tree(root, zip_path)
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         safe_name = re.sub(r'[\\/:*?"<>|]+', "-", job["version_name"]).strip()
         with JOBS_LOCK:
             job["zip_name"] = f"{safe_name or 'upgrade-debs'}-{timestamp}.zip"
@@ -1342,18 +1594,181 @@ def job_zip(job_id: str):
     )
 
 
+def _client_is_local() -> bool:
+    """判断当前请求是否来自本机（回环地址或本机网卡地址）。"""
+    remote = request.remote_addr or ""
+    try:
+        address = ipaddress.ip_address(remote)
+    except ValueError:
+        return False
+    if address.is_loopback:
+        return True
+    try:
+        host_addresses = {
+            ipaddress.ip_address(item)
+            for item in socket.gethostbyname_ex(socket.gethostname())[2]
+        }
+    except Exception:  # noqa: BLE001 - 取不到本机地址时按远程处理
+        host_addresses = set()
+    return address in host_addresses
+
+
+def _build_deploy_zip() -> io.BytesIO:
+    buffer = io.BytesIO()
+    files = [
+        "oem_deb_fetch.py",
+        "web_fetch.py",
+        "run-fetch-web.sh",
+        "requirements.txt",
+        "VERSION",
+        "README.md",
+        "install.sh",
+    ]
+    legacy_templates = {"index.html", "preview.html", "result.html"}
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for relative in files:
+            path = WORKDIR / relative
+            if path.is_file():
+                archive.write(path, f"oem-deb-resolver/{relative}")
+        for dirname in ("static", "templates"):
+            base = WORKDIR / dirname
+            if not base.is_dir():
+                continue
+            for path in sorted(base.rglob("*")):
+                if not path.is_file() or "__pycache__" in path.parts:
+                    continue
+                if dirname == "templates" and path.name in legacy_templates:
+                    continue
+                archive.write(
+                    path, f"oem-deb-resolver/{path.relative_to(WORKDIR)}"
+                )
+        if VERSIONS_FILE.is_file():
+            archive.write(VERSIONS_FILE, "oem-deb-resolver/config/versions.json")
+    buffer.seek(0)
+    return buffer
+
+
+def _fetch_latest_version() -> tuple[str | None, str]:
+    urls: list[str] = []
+    env_url = os.environ.get("OEM_UPDATE_URL", "").strip()
+    if env_url:
+        urls.append(env_url)
+    urls.extend(DEFAULT_UPDATE_URLS)
+
+    errors: list[str] = []
+    for url in urls:
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "oem-deb-fetcher/update-check"}
+            )
+            with urllib.request.urlopen(request, timeout=8) as response:
+                text = response.read().decode("utf-8", errors="replace")
+        except Exception as exc:  # noqa: BLE001 - 汇总后返回给页面
+            errors.append(f"{url}: {exc}")
+            continue
+        latest = text.strip().splitlines()[0].strip() if text.strip() else ""
+        latest = latest.lstrip("vV")
+        if latest:
+            return latest, url
+    return None, "; ".join(errors[-2:])
+
+
+@app.route("/about", methods=["GET"])
+def about():
+    try:
+        flask_version = importlib.metadata.version("flask")
+    except importlib.metadata.PackageNotFoundError:
+        flask_version = "未知"
+    return render_template(
+        "about.html",
+        app_version=APP_VERSION,
+        python_version=sys.version.split()[0],
+        flask_version=flask_version,
+        verifier=shutil.which("deepin-deb-verify") or "",
+        is_local=_client_is_local(),
+        github_url=GITHUB_URL,
+    )
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    response = jsonify(
+        {"status": "ok", "app": "oem-deb-resolver", "version": APP_VERSION}
+    )
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/deploy", methods=["GET"])
+def deploy():
+    return render_template(
+        "deploy.html",
+        app_version=APP_VERSION,
+        github_url=GITHUB_URL,
+        public_url=request.host_url.rstrip("/"),
+        has_config=VERSIONS_FILE.is_file(),
+    )
+
+
+@app.route("/deploy/package.zip", methods=["GET"])
+def deploy_package():
+    return send_file(
+        _build_deploy_zip(),
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"oem-deb-resolver-{APP_VERSION}.zip",
+    )
+
+
+@app.route("/about/check-update", methods=["POST"])
+def about_check_update():
+    latest, source = _fetch_latest_version()
+    if not latest:
+        return jsonify(
+            {
+                "status": "error",
+                "message": "检查更新失败：无法获取远程版本",
+                "detail": source,
+                "current": APP_VERSION,
+                "url": "",
+            }
+        )
+    comparison = compare_versions(latest, APP_VERSION)
+    if comparison > 0:
+        status = "update"
+        message = f"发现新版本 v{latest}（当前 v{APP_VERSION}）"
+    elif comparison == 0:
+        status = "latest"
+        message = f"已是最新版本 v{APP_VERSION}"
+    else:
+        status = "latest"
+        message = f"当前版本 v{APP_VERSION}，远程版本 v{latest}"
+    return jsonify(
+        {
+            "status": status,
+            "message": message,
+            "current": APP_VERSION,
+            "latest": latest,
+            "source": source,
+            "url": GITHUB_URL,
+        }
+    )
+
+
 def main() -> None:
     import argparse
     import webbrowser
 
     parser = argparse.ArgumentParser(description="启动 oem deb 升级包下载服务")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=51234)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
     _ensure_dirs()
-    url = f"http://{args.host}:{args.port}/"
+    browser_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
+    url = f"http://{browser_host}:{args.port}/"
     if not args.no_browser:
         try:
             webbrowser.open(url)

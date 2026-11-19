@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}本地部署 · OEM 升级包中心{% endblock %}
+{% block content %}
+<header class="page">
+  <div>
+    <h1>本地部署</h1>
+    <p>从当前环境下载部署包，在本地运行一套相同的服务。</p>
+  </div>
+  <div class="actions" style="margin-top:0">
+    <a class="btn" href="{{ url_for('about') }}">返回</a>
+    <a class="btn" href="{{ url_for('index') }}">主页</a>
+  </div>
+</header>
+
+<div class="panel">
+  <h2 style="margin-top:0">从当前环境部署</h2>
+  <p class="muted" style="margin-top:0">
+    部署源：<code>{{ public_url }}</code>
+    <span id="sourceStatus" class="chip" style="margin-left:8px">检查中…</span>
+  </p>
+  <p class="hint">
+    部署包包含代码、模板、图标、启动脚本和 VERSION
+    {% if has_config %}，以及当前版本配置 <code>config/versions.json</code>{% endif %}；
+    不包含 <code>.venv</code>、<code>cache</code> 和下载文件。
+  </p>
+  <a class="btn primary" href="{{ url_for('deploy_package') }}">下载部署包 oem-deb-resolver-{{ app_version }}.zip</a>
+
+  <h3>安装步骤</h3>
+  <pre class="repos">unzip oem-deb-resolver-{{ app_version }}.zip
+cd oem-deb-resolver
+bash run-fetch-web.sh</pre>
+  <p class="hint">要求目标机器有 Python 3.8+；首次运行会自动创建 `.venv` 并安装 Flask。</p>
+</div>
+
+<div class="panel">
+  <h2 style="margin-top:0">从 GitHub 部署</h2>
+  <p class="mono" style="margin-top:0">{{ github_url }}</p>
+  <pre class="repos">git clone {{ github_url }}.git
+cd oem-deb-resolver
+bash run-fetch-web.sh</pre>
+  <a class="btn" href="{{ github_url }}" target="_blank" rel="noopener">打开 GitHub</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (function () {
+    var status = document.getElementById('sourceStatus');
+    fetch('{{ public_url }}/health', { cache: 'no-store' })
+      .then(function (response) {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        return response.json();
+      })
+      .then(function (data) {
+        status.textContent = data.status === 'ok' ? '在线 v' + data.version : '异常';
+        status.style.color = data.status === 'ok' ? 'var(--ok)' : 'var(--error)';
+      })
+      .catch(function () {
+        status.textContent = '不可用';
+        status.style.color = 'var(--error)';
+      });
+  })();
+</script>
+{% endblock %}

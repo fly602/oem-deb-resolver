@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}关于 · OEM 升级包中心{% endblock %}
+{% block content %}
+<header class="page">
+  <div>
+    <h1>关于</h1>
+    <p>版本信息、运行环境与更新检查</p>
+  </div>
+  <div class="actions" style="margin-top:0">
+    {% if not is_local %}
+    <a class="btn primary" id="deployLink" href="{{ url_for('deploy') }}">本地部署</a>
+    {% endif %}
+    <a class="btn" href="{{ url_for('index') }}">返回</a>
+    <a class="btn" href="{{ url_for('index') }}">主页</a>
+  </div>
+</header>
+
+<div class="panel">
+  <div class="brand">
+    <img class="brand-icon" src="{{ url_for('static', filename='icon.svg') }}" alt="">
+    <div>
+      <div class="brand-kicker">OEM 升级包中心</div>
+      <h2 style="margin:0 0 4px; font-size:22px">版本 v{{ app_version }}</h2>
+      <p class="muted" style="margin:0">从 APT 仓库拉取相对基线可升级的 deb 包，按项目检查、下载与验签。</p>
+    </div>
+  </div>
+  <div class="chips" style="margin:18px 0 0">
+    <span class="chip">Python <strong>{{ python_version }}</strong></span>
+    <span class="chip">Flask <strong>{{ flask_version }}</strong></span>
+    <span class="chip">deepin-deb-verify <strong>{{ '可用' if verifier else '未安装' }}</strong></span>
+  </div>
+  <div class="actions">
+    <a class="btn" href="{{ github_url }}" target="_blank" rel="noopener">GitHub 项目</a>
+  </div>
+</div>
+
+<div class="panel">
+  <h2 style="margin-top:0">检查更新</h2>
+  <p class="hint" style="margin-top:0">
+    当前版本 <strong>v{{ app_version }}</strong>。默认从项目 GitHub 的 <code>VERSION</code> 文件检查，
+    也可以通过环境变量 <code>OEM_UPDATE_URL</code> 指定版本文件地址。
+  </p>
+  <button type="button" class="primary" id="checkUpdateBtn">检查更新</button>
+  <div id="updateResult" style="margin-top:14px"></div>
+</div>
+
+<div class="panel">
+  <h2 style="margin-top:0">功能</h2>
+  <ul class="muted" style="margin:0; padding-left:20px">
+    <li>版本管理：基线清单、按架构自动识别、多仓库组配置</li>
+    <li>检查更新：按源码项目归总，组内多仓库合并取最高版本</li>
+    <li>下载验签：实时进度、未签名确认、自动打包与版本对比信息</li>
+    <li>配置导入：合并同名版本仓库，不删除已有配置</li>
+  </ul>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (function () {
+    var deployLink = document.getElementById('deployLink');
+    if (deployLink) {
+      var controller = new AbortController();
+      var timer = setTimeout(function () { controller.abort(); }, 1500);
+      fetch('http://127.0.0.1:51234/health', {
+        mode: 'cors',
+        cache: 'no-store',
+        signal: controller.signal
+      }).then(function (response) {
+        return response.ok ? response.json() : null;
+      }).then(function (data) {
+        if (data && data.status === 'ok') {
+          deployLink.remove();
+        }
+      }).catch(function () {
+        // 本机没有部署，保留按钮
+      }).finally(function () {
+        clearTimeout(timer);
+      });
+    }
+
+    var button = document.getElementById('checkUpdateBtn');
+    var box = document.getElementById('updateResult');
+    var url = "{{ url_for('about_check_update') }}";
+
+    button.addEventListener('click', async function () {
+      button.disabled = true;
+      box.className = 'hint';
+      box.textContent = '正在检查…';
+      try {
+        var response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Accept': 'application/json' }
+        });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        var data = await response.json();
+        if (data.status === 'error') {
+          box.className = 'box error';
+          box.textContent = data.message + (data.detail ? '：' + data.detail : '');
+        } else {
+          box.className = 'box ok';
+          box.textContent = data.message;
+          if (data.status === 'update' && data.url) {
+            var link = document.createElement('a');
+            link.href = data.url;
+            link.target = '_blank';
+            link.rel = 'noopener';
+            link.textContent = ' 打开项目主页';
+            box.appendChild(link);
+          }
+        }
+      } catch (error) {
+        box.className = 'box error';
+        box.textContent = '检查更新失败：' + error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+  })();
+</script>
+{% endblock %}

@@ -11,6 +11,8 @@
     </div>
   </div>
   <div class="actions" style="margin-top:0">
+    <a class="btn" href="{{ url_for('version_import') }}">导入配置</a>
+    <a class="btn" href="{{ url_for('about') }}">关于</a>
     <a class="btn primary" href="{{ url_for('version_new') }}">+ 新增版本</a>
   </div>
 </header>
@@ -45,6 +47,10 @@
             <button type="submit" class="btn sm primary">检查更新</button>
           </form>
           <a class="btn sm" href="{{ url_for('version_edit', version_id=version.id) }}">编辑</a>
+          <form method="post" action="{{ url_for('version_delete', version_id=version.id) }}" style="display:inline; margin:0"
+                onsubmit="return confirm('确定删除版本 {{ version.name }} 及其检查缓存？');">
+            <button type="submit" class="btn sm danger">删除</button>
+          </form>
         </div>
       </td>
     </tr>

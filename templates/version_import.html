@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}导入版本配置 · OEM 升级包中心{% endblock %}
+{% block content %}
+<header class="page">
+  <div>
+    <h1>导入版本配置</h1>
+    <p>导入 <code>versions.json</code>，可直接使用打包 zip 根目录中的配置文件。</p>
+  </div>
+  <div class="actions" style="margin-top:0">
+    <a class="btn" href="{{ url_for('index') }}">返回</a>
+    <a class="btn" href="{{ url_for('index') }}">主页</a>
+  </div>
+</header>
+
+{% if error %}
+<div class="box error"><h3>导入失败</h3><p style="margin:0">{{ error }}</p></div>
+{% endif %}
+
+{% if result %}
+<div class="box ok">
+  <strong>导入完成：新增 {{ result.added }} 个版本，整合 {{ result.updated }} 个版本。</strong>
+  <p class="hint" style="margin:6px 0 0">{{ result.names|join('、') }}</p>
+  <div class="actions">
+    <a class="btn primary" href="{{ url_for('index') }}">返回版本列表</a>
+  </div>
+</div>
+{% endif %}
+
+<form class="panel" method="post" action="{{ url_for('version_import') }}" enctype="multipart/form-data">
+  <div class="field">
+    <label class="title" for="config_file">选择 versions.json</label>
+    <input type="file" id="config_file" name="config_file" accept=".json,application/json">
+  </div>
+  <div class="field">
+    <label class="title">整合规则</label>
+    <p class="hint" style="margin:0">同名版本保留现有配置，只追加导入中缺失的仓库组和仓库；导入文件中没有的版本不受影响，不会被删除。</p>
+  </div>
+  <div class="field">
+    <label class="title" for="json_text">或粘贴配置内容</label>
+    <textarea id="json_text" name="json_text" rows="12" placeholder='{"schema": 1, "versions": [...]}'></textarea>
+    <p class="hint">同 id 的版本会被更新，新 id 会追加。导入时会按基线文件名自动校正架构。</p>
+  </div>
+  <div class="actions">
+    <button type="submit" class="primary">导入</button>
+    <a class="btn" href="{{ url_for('index') }}">取消</a>
+  </div>
+</form>
+{% endblock %}
