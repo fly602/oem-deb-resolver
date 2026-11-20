@@ -70,6 +70,8 @@ APP_VERSION = (
 DEFAULT_UPDATE_URLS = (
     "https://github.com/fly602/oem-deb-resolver/raw/main/VERSION",
     "https://github.com/fly602/oem-deb-resolver/raw/refactor/simplified-fetch/VERSION",
+    "https://api.github.com/repos/fly602/oem-deb-resolver/contents/VERSION?ref=main",
+    "https://api.github.com/repos/fly602/oem-deb-resolver/contents/VERSION?ref=refactor/simplified-fetch",
 )
 GITHUB_URL = "https://github.com/fly602/oem-deb-resolver"
 
@@ -1967,17 +1969,23 @@ def _build_deploy_zip() -> io.BytesIO:
 
 
 def _fetch_latest_version() -> tuple[str | None, str]:
-    urls: list[str] = []
     env_url = os.environ.get("OEM_UPDATE_URL", "").strip()
     if env_url:
-        urls.append(env_url)
-    urls.extend(DEFAULT_UPDATE_URLS)
+        urls = [env_url]
+    else:
+        urls = list(DEFAULT_UPDATE_URLS)
 
     errors: list[str] = []
+    best_version: str | None = None
+    best_url = ""
     for url in urls:
         try:
             request = urllib.request.Request(
-                url, headers={"User-Agent": "oem-deb-fetcher/update-check"}
+                url,
+                headers={
+                    "User-Agent": "oem-deb-fetcher/update-check",
+                    "Accept": "application/vnd.github.raw",
+                },
             )
             with urllib.request.urlopen(request, timeout=8) as response:
                 text = response.read().decode("utf-8", errors="replace")
@@ -1986,8 +1994,13 @@ def _fetch_latest_version() -> tuple[str | None, str]:
             continue
         latest = text.strip().splitlines()[0].strip() if text.strip() else ""
         latest = latest.lstrip("vV")
-        if latest:
-            return latest, url
+        if not latest or latest.startswith("{"):
+            continue
+        if best_version is None or compare_versions(latest, best_version) > 0:
+            best_version = latest
+            best_url = url
+    if best_version:
+        return best_version, best_url
     return None, "; ".join(errors[-2:])
 
 
