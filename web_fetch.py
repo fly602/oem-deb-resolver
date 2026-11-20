@@ -45,6 +45,7 @@ from oem_deb_fetch import (
     Package,
     Upgrade,
     _download_one,
+    baseline_filename,
     compare_versions,
     fetch_index,
     find_upgrades,
@@ -551,15 +552,287 @@ def version_create():
     return redirect(url_for("version_detail", version_id=version["id"]))
 
 
+def _nominal_baseline_url(source: str, arch: str) -> str:
+    if source.rstrip("/").lower().endswith(".txt"):
+        return source
+    return (
+        f"{source.rstrip('/')}/report/iso-package-list/"
+        f"{baseline_filename(arch)}"
+    )
+
+
+def _repo_short_label(url: str) -> str:
+    parsed = urlsplit(url)
+    tail = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    host = parsed.hostname or url
+    if tail and len(tail) >= 24:
+        return tail
+    return f"{host}/{tail}" if tail else host
+
+
+def _friendly_baseline_label(source: str) -> str:
+    tail = source.rstrip("/").rsplit("/", 1)[-1]
+    if tail.lower().endswith(".txt"):
+        arch = detect_arch_from_baseline(source)
+        if arch:
+            return f"基线包清单（{arch}）"
+        return f"基线包清单（{tail}）"
+    match = re.search(r"/([^/]*stable[^/]*)/?$", source, re.IGNORECASE)
+    if match:
+        return f"{match.group(1)} 基线清单"
+    return "发布基线清单"
+
+
+def _source_page_url(
+    version_id: str,
+    kind: str,
+    arch: str,
+    q: str,
+    per_page: str,
+    page: int,
+    group_index: int | None = None,
+    repo_index: int | None = None,
+) -> str:
+    params = {
+        "version_id": version_id,
+        "kind": kind,
+        "arch": arch,
+        "per_page": per_page,
+        "page": page,
+    }
+    if q:
+        params["q"] = q
+    if kind == "repo":
+        params["group"] = group_index
+        params["repo"] = repo_index
+    return url_for("version_source_detail", **params)
+
+
 @app.route("/versions/<version_id>", methods=["GET"])
 def version_detail(version_id: str):
     version = _get_version(version_id)
+    repo_groups = []
+    repo_count = 0
+    for group_index, group in enumerate(version["groups"]):
+        repos = []
+        for repo_index, spec in enumerate(group["repos"]):
+            repo_count += 1
+            try:
+                repo = parse_repo_spec(spec)
+                url = repo.url
+                short = _repo_short_label(url)
+            except ValueError:
+                url = spec
+                short = spec
+            repos.append(
+                {
+                    "serial": repo_index + 1,
+                    "group_index": group_index,
+                    "repo_index": repo_index,
+                    "url": url,
+                    "short": short,
+                }
+            )
+        repo_groups.append(
+            {"index": group_index, "name": group["name"], "repos": repos}
+        )
+    baseline_rows = []
+    for index, arch in enumerate(_arch_list(effective_arch(version))):
+        try:
+            url = resolve_baseline_source(version["base_list"], arch)
+            error = ""
+        except (FetchError, ValueError) as exc:
+            url = _nominal_baseline_url(version["base_list"], arch)
+            error = str(exc)
+        baseline_rows.append(
+            {
+                "serial": index + 1,
+                "arch": arch,
+                "url": url,
+                "label": url.rstrip("/").rsplit("/", 1)[-1] or url,
+                "error": error,
+            }
+        )
     return render_template(
         "version_detail.html",
         version=version,
         display_arch=effective_arch(version),
         detected_arch=detect_arch_from_baseline(version.get("base_list", "")),
-        repo_count=sum(len(group.get("repos", [])) for group in version["groups"]),
+        repo_count=repo_count,
+        baseline_rows=baseline_rows,
+        repo_groups=repo_groups,
+        error=request.args.get("error", ""),
+    )
+
+
+@app.route("/versions/<version_id>/source", methods=["GET"])
+def version_source_detail(version_id: str):
+    version = _get_version(version_id)
+    kind = request.args.get("kind", "baseline")
+    if kind not in ("baseline", "repo"):
+        kind = "baseline"
+
+    arch_options = _arch_list(effective_arch(version))
+    arch = request.args.get("arch", "")
+    if arch not in arch_options:
+        arch = arch_options[0] if arch_options else "amd64"
+
+    q = request.args.get("q", "").strip()[:100]
+    per_page_raw = request.args.get("per_page", "100")
+    per_page_map = {"50": 50, "100": 100, "500": 500, "1000": 1000, "all": None}
+    if per_page_raw not in per_page_map:
+        per_page_raw = "100"
+    per_page = per_page_map[per_page_raw]
+
+    try:
+        page = max(1, int(request.args.get("page", "1") or 1))
+    except ValueError:
+        page = 1
+
+    label = ""
+    url = ""
+    rows: list[dict] = []
+    error = ""
+    group_index: int | None = None
+    repo_index: int | None = None
+
+    if kind == "baseline":
+        label = _friendly_baseline_label(version["base_list"])
+        try:
+            source = resolve_baseline_source(version["base_list"], arch)
+            baseline = load_baseline(source, arch)
+            rows = [
+                {"name": name, "version": version_text}
+                for name, version_text in baseline.items()
+            ]
+            url = source
+        except (FetchError, ValueError) as exc:
+            error = str(exc)
+            url = version["base_list"]
+    else:
+        try:
+            group_index = int(request.args.get("group", "0"))
+            repo_index = int(request.args.get("repo", "0"))
+            group = version["groups"][group_index]
+            spec = group["repos"][repo_index]
+            repo = parse_repo_spec(spec)
+            host = urlsplit(repo.url).hostname or repo.url
+            label = f"{group['name']} · {host}"
+            url = repo.url
+            packages = fetch_index(repo, arch)
+            rows = [
+                {
+                    "name": package.name,
+                    "version": package.version,
+                    "architecture": package.architecture,
+                    "size": package.size,
+                    "filename": package.filename,
+                }
+                for package in packages.values()
+            ]
+        except (IndexError, ValueError, FetchError) as exc:
+            error = str(exc)
+            if not label:
+                label = "补丁仓库"
+
+    if q:
+        needle = q.lower()
+        rows = [
+            row
+            for row in rows
+            if needle in row["name"].lower() or needle in row["version"].lower()
+        ]
+    rows.sort(key=lambda row: row["name"])
+
+    total = len(rows)
+    if per_page is None:
+        total_pages = 1
+        page = 1
+        shown = rows
+    else:
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        page = min(page, total_pages)
+        start = (page - 1) * per_page
+        shown = rows[start : start + per_page]
+
+    if total == 0:
+        start_index = end_index = 0
+    elif per_page is None:
+        start_index, end_index = 1, total
+    else:
+        start_index = (page - 1) * per_page + 1
+        end_index = min(total, page * per_page)
+
+    page_links = []
+    if total_pages > 1:
+        first_page = max(1, page - 2)
+        last_page = min(total_pages, page + 2)
+        for number in range(first_page, last_page + 1):
+            page_links.append(
+                {
+                    "number": number,
+                    "url": _source_page_url(
+                        version_id,
+                        kind,
+                        arch,
+                        q,
+                        per_page_raw,
+                        number,
+                        group_index,
+                        repo_index,
+                    ),
+                }
+            )
+    prev_url = (
+        _source_page_url(
+            version_id,
+            kind,
+            arch,
+            q,
+            per_page_raw,
+            page - 1,
+            group_index,
+            repo_index,
+        )
+        if page > 1
+        else ""
+    )
+    next_url = (
+        _source_page_url(
+            version_id,
+            kind,
+            arch,
+            q,
+            per_page_raw,
+            page + 1,
+            group_index,
+            repo_index,
+        )
+        if page < total_pages
+        else ""
+    )
+    return render_template(
+        "source_detail.html",
+        version=version,
+        kind=kind,
+        label=label,
+        url=url,
+        arch=arch,
+        arch_options=arch_options,
+        q=q,
+        per_page=per_page_raw,
+        page=page,
+        total=total,
+        total_pages=total_pages,
+        shown=shown,
+        error=error,
+        start_index=start_index,
+        end_index=end_index,
+        page_links=page_links,
+        prev_url=prev_url,
+        next_url=next_url,
+        group_index=group_index,
+        repo_index=repo_index,
     )
 
 
@@ -614,7 +887,11 @@ def version_delete(version_id: str):
 def version_validate_baseline(version_id: str):
     version = _get_version(version_id)
     checks: list[dict] = []
-    for arch in _arch_list(effective_arch(version)):
+    arches = _arch_list(effective_arch(version))
+    arch_filter = request.values.get("arch")
+    if arch_filter in arches:
+        arches = [arch_filter]
+    for arch in arches:
         try:
             source = resolve_baseline_source(version["base_list"], arch)
             baseline = load_baseline(source, arch)
@@ -650,7 +927,28 @@ def version_validate_baseline(version_id: str):
 def version_validate_repos(version_id: str):
     version = _get_version(version_id)
     checks: list[dict] = []
-    for group in version["groups"]:
+
+    group_filter = request.values.get("group_index")
+    repo_filter = request.values.get("repo_index")
+    try:
+        group_filter_index = int(group_filter) if group_filter is not None else None
+        repo_filter_index = int(repo_filter) if repo_filter is not None else None
+    except ValueError:
+        group_filter_index = repo_filter_index = None
+
+    filtered_groups: list[dict] = []
+    for group_index, group in enumerate(version["groups"]):
+        if group_filter_index is not None and group_index != group_filter_index:
+            continue
+        repos = [
+            spec
+            for repo_index, spec in enumerate(group["repos"])
+            if repo_filter_index is None or repo_index == repo_filter_index
+        ]
+        if repos:
+            filtered_groups.append({"name": group["name"], "repos": repos})
+
+    for group in filtered_groups:
         for spec in group["repos"]:
             try:
                 repo = parse_repo_spec(spec)
@@ -849,6 +1147,24 @@ def version_check(version_id: str):
     _ensure_dirs()
     version = _get_version(version_id)
     filters = _parse_filters(request.form.get("filters", ""))
+    manual_scope = request.form.get("scope") == "selected"
+    selected_repos: set[tuple[int, int]] = set()
+    for raw in request.form.getlist("repos"):
+        parts = raw.split(":", 1)
+        if len(parts) != 2:
+            continue
+        try:
+            selected_repos.add((int(parts[0]), int(parts[1])))
+        except ValueError:
+            continue
+    if manual_scope and not selected_repos:
+        return redirect(
+            url_for(
+                "version_detail",
+                version_id=version_id,
+                error="请至少勾选一个补丁仓库",
+            )
+        )
     groups = [
         {
             "name": group["name"],
@@ -874,8 +1190,10 @@ def version_check(version_id: str):
         arches_meta.append(
             {"arch": arch, "source": source, "base_count": len(baseline), "error": ""}
         )
-        for group in groups:
-            for repo in group["repos"]:
+        for group_index, group in enumerate(groups):
+            for repo_index, repo in enumerate(group["repos"]):
+                if manual_scope and (group_index, repo_index) not in selected_repos:
+                    continue
                 try:
                     parsed = parse_repo_spec(repo["spec"])
                     packages = fetch_index(parsed, arch)

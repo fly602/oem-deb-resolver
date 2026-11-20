@@ -1,10 +1,29 @@
 {% extends "base.html" %}
 {% block title %}{{ version.name }} · OEM 升级包中心{% endblock %}
+{% block style %}
+    .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: auto; }
+    .table-wrap table { border: 0; border-radius: 0; }
+    .row-actions { display: flex; gap: 8px; justify-content: flex-end; white-space: nowrap; }
+    .row-actions .btn { white-space: nowrap; }
+    .config-table th:last-child, .config-table td:last-child { width: 1%; white-space: nowrap; }
+    .empty-note { color: var(--muted); background: var(--surface); border: 1px dashed var(--border); border-radius: 12px; padding: 22px; text-align: center; }
+    .repo-group-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 14px; overflow: hidden; }
+    .repo-group-head { display: flex; align-items: center; gap: 8px; padding: 11px 12px; background: #fafbfc; border-bottom: 1px solid var(--border); }
+    .repo-group-head strong { font-size: 15px; }
+    .repo-group-card table { border: 0; border-radius: 0; }
+    .repo-check, .group-check { width: 17px; height: 17px; margin: 0; flex: none; cursor: pointer; }
+    .check-col { width: 34px; text-align: center; }
+    .repo-address { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12.5px; word-break: break-all; }
+    .unverified { color: var(--error); font-size: 12px; margin-left: 6px; }
+    .check-summary { font-size: 12.5px; line-height: 1.6; }
+    .check-summary .ok-text { color: var(--ok); font-weight: 600; }
+    .check-summary .err-text { color: var(--error); font-weight: 600; }
+{% endblock %}
 {% block content %}
 <header class="page">
   <div>
     <h1>{{ version.name }}</h1>
-    <p>版本配置 · 基线清单 {{ display_arch }} 架构{% if detected_arch %}（由基线文件名自动识别）{% endif %} · {{ version.groups|length }} 个仓库组 / {{ repo_count }} 个仓库</p>
+    <p>版本配置 · {{ display_arch }} 架构{% if detected_arch %}（由基线文件名自动识别）{% endif %} · {{ version.groups|length }} 个仓库组 / {{ repo_count }} 个仓库</p>
   </div>
   <div class="actions" style="margin-top:0">
     <a class="btn" href="{{ url_for('index') }}">返回</a>
@@ -12,114 +31,202 @@
   </div>
 </header>
 
-<div class="panel">
-  <h2 style="margin-top:0">基线清单</h2>
-  <p class="mono" style="margin-top:0; word-break:break-all">{{ version.base_list }}</p>
-  <button type="button" class="btn" id="btnValidateBaseline">检查有效性</button>
-  <div id="baselineResult" class="inline-check"></div>
+{% if error %}
+<div class="box error"><h3>无法检查更新</h3><p style="margin:0">{{ error }}</p></div>
+{% endif %}
+
+<div class="chips">
+  <span class="chip">架构 <strong>{{ display_arch }}</strong>{% if detected_arch %} <span class="muted">自动识别</span>{% endif %}</span>
+  <span class="chip">仓库组 <strong>{{ version.groups|length }}</strong></span>
+  <span class="chip">仓库 <strong>{{ repo_count }}</strong></span>
+  {% if version.created_at %}<span class="chip">创建于 <strong>{{ version.created_at }}</strong></span>{% endif %}
 </div>
 
-<div class="panel">
-  <h2 style="margin-top:0">补丁仓库</h2>
-  {% for group in version.groups %}
-  <div class="group-block">
-    <h3>{{ group.name }} · {{ group.repos|length }} 个仓库</h3>
-    <pre class="repos">{% for repo in group.repos %}{{ repo }}
-{% endfor %}</pre>
+<h2>基线清单</h2>
+<div class="table-wrap">
+  <table class="config-table">
+    <thead>
+      <tr><th class="num">序号</th><th>架构</th><th>地址</th><th>结果</th><th class="num">操作</th></tr>
+    </thead>
+    <tbody>
+      {% for row in baseline_rows %}
+      <tr>
+        <td class="num">{{ row.serial }}</td>
+        <td class="mono">{{ row.arch }}</td>
+        <td>
+          {% if row.url.startswith('http') %}
+          <a href="{{ row.url }}" target="_blank" rel="noopener" title="{{ row.url }}">{{ row.label }} ↗</a>
+          {% else %}
+          {{ row.label }}
+          {% endif %}
+          {% if row.error %}<span class="unverified" title="{{ row.error }}">未验证</span>{% endif %}
+        </td>
+        <td class="auto-check"
+            id="baseline-result-{{ loop.index0 }}"
+            data-check-url="{{ url_for('version_validate_baseline', version_id=version.id) }}"
+            data-arch="{{ row.arch }}"><span class="muted">检查中…</span></td>
+        <td>
+          <div class="row-actions">
+            <a class="btn sm" href="{{ url_for('version_source_detail', version_id=version.id, kind='baseline', arch=row.arch) }}">详情</a>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>补丁仓库</h2>
+{% if repo_groups %}
+<form method="post" action="{{ url_for('version_check', version_id=version.id) }}">
+  <input type="hidden" name="scope" value="selected">
+  {% for group in repo_groups %}
+  <div class="repo-group-card">
+    <div class="repo-group-head">
+      <input type="checkbox" class="group-check" checked title="勾选/取消本组全部仓库" aria-label="选择仓库组 {{ group.name }}">
+      <strong>{{ group.name }}</strong>
+      <span class="chip">{{ group.repos|length }} 个仓库</span>
+    </div>
+    <table class="config-table">
+      <thead>
+        <tr><th class="check-col">选择</th><th class="num">序号</th><th>仓库地址</th><th>结果</th><th class="num">操作</th></tr>
+      </thead>
+      <tbody>
+        {% for repo in group.repos %}
+        <tr>
+          <td class="check-col">
+            <input type="checkbox" class="repo-check" name="repos" value="{{ group.index }}:{{ repo.repo_index }}" checked
+                   aria-label="选择仓库 {{ repo.short }}">
+          </td>
+          <td class="num">{{ repo.serial }}</td>
+          <td>
+            {% if repo.url.startswith('http') %}
+            <a class="repo-address" href="{{ repo.url }}" target="_blank" rel="noopener" title="{{ repo.url }}">{{ repo.short }} ↗</a>
+            {% else %}
+            <span class="repo-address">{{ repo.short }}</span>
+            {% endif %}
+          </td>
+          <td class="auto-check"
+              id="repo-result-{{ group.index }}-{{ repo.repo_index }}"
+              data-check-url="{{ url_for('version_validate_repos', version_id=version.id) }}"
+              data-group="{{ group.index }}" data-repo="{{ repo.repo_index }}"><span class="muted">检查中…</span></td>
+          <td>
+            <div class="row-actions">
+              <a class="btn sm" href="{{ url_for('version_source_detail', version_id=version.id, kind='repo', group=group.index, repo=repo.repo_index) }}">详情</a>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
   </div>
   {% endfor %}
-  <button type="button" class="btn" id="btnValidateRepos">检查有效性</button>
-  <div id="reposResult" class="inline-check"></div>
-</div>
 
+  <div class="actions split">
+    <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
+      <button type="submit" class="primary">检查更新</button>
+      <span class="muted" id="repoSelectionCount"></span>
+    </div>
+    <a class="btn" href="{{ url_for('version_edit', version_id=version.id) }}">编辑配置</a>
+  </div>
+</form>
+{% else %}
+<div class="empty-note">还没有补丁仓库，请先编辑配置。</div>
 <div class="actions split">
-  <form method="post" action="{{ url_for('version_check', version_id=version.id) }}">
-    <button type="submit" class="primary">检查更新</button>
-  </form>
+  <span></span>
   <a class="btn" href="{{ url_for('version_edit', version_id=version.id) }}">编辑配置</a>
 </div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
 <script>
   (function () {
-    var urls = {
-      baseline: "{{ url_for('version_validate_baseline', version_id=version.id) }}",
-      repos: "{{ url_for('version_validate_repos', version_id=version.id) }}"
-    };
-
-    function makeCell(text, className) {
-      var cell = document.createElement('td');
-      cell.textContent = text;
-      if (className) cell.className = className;
-      return cell;
-    }
-
-    function renderChecks(box, data, columns) {
-      box.textContent = '';
-      var table = document.createElement('table');
-      var head = document.createElement('thead');
-      var headRow = document.createElement('tr');
-      columns.forEach(function (column) {
-        var th = document.createElement('th');
-        th.textContent = column;
-        headRow.appendChild(th);
-      });
-      head.appendChild(headRow);
-      table.appendChild(head);
-
-      var body = document.createElement('tbody');
-      data.checks.forEach(function (check) {
-        var row = document.createElement('tr');
-        var archCell = makeCell(check.arch, 'mono');
-        if (check.subtitle) archCell.title = check.subtitle;
-        row.appendChild(archCell);
-        if (data.kind === 'repos') {
-          row.appendChild(makeCell(check.title, ''));
-          row.appendChild(makeCell(check.subtitle, 'mono'));
+    function renderResult(cell, data) {
+      cell.textContent = '';
+      if (!data.checks.length) {
+        cell.textContent = '—';
+        return;
+      }
+      var wrap = document.createElement('div');
+      wrap.className = 'check-summary';
+      data.checks.forEach(function (check, index) {
+        if (index > 0) wrap.appendChild(document.createTextNode(' · '));
+        var span = document.createElement('span');
+        span.className = check.ok ? 'ok-text' : 'err-text';
+        if (check.ok) {
+          span.textContent = check.arch + ' ✓ ' + check.message;
+          span.title = check.subtitle || '';
+        } else {
+          var message = check.message || '失败';
+          if (message.length > 60) message = message.slice(0, 60) + '…';
+          span.textContent = check.arch + ' ✗ ' + message;
+          span.title = check.message || '';
         }
-        var result = document.createElement('td');
-        var mark = document.createElement('span');
-        mark.className = check.ok ? 'ok-text' : 'err-text';
-        mark.textContent = (check.ok ? '✓ ' : '✗ ') + check.message;
-        result.appendChild(mark);
-        row.appendChild(result);
-        body.appendChild(row);
+        wrap.appendChild(span);
       });
-      table.appendChild(body);
-      box.appendChild(table);
+      cell.appendChild(wrap);
     }
 
-    async function run(button, box, url, columns) {
-      button.disabled = true;
-      box.innerHTML = '<p class="hint">检查中…</p>';
+    async function runCheck(cell) {
+      var body = new FormData();
+      if (cell.dataset.arch) body.append('arch', cell.dataset.arch);
+      if (cell.dataset.group !== undefined) {
+        body.append('group_index', cell.dataset.group);
+        body.append('repo_index', cell.dataset.repo);
+      }
       try {
-        var response = await fetch(url, {
+        var response = await fetch(cell.dataset.checkUrl, {
           method: 'POST',
-          headers: { 'Accept': 'application/json' }
+          headers: { 'Accept': 'application/json' },
+          body: body
         });
         if (!response.ok) throw new Error('HTTP ' + response.status);
-        var data = await response.json();
-        renderChecks(box, data, columns);
+        renderResult(cell, await response.json());
       } catch (error) {
-        box.textContent = '';
-        var failure = document.createElement('div');
-        failure.className = 'box error';
-        failure.textContent = '检查请求失败: ' + error.message;
-        box.appendChild(failure);
-      } finally {
-        button.disabled = false;
+        cell.textContent = '';
+        var failure = document.createElement('span');
+        failure.className = 'err-text';
+        failure.textContent = '检查失败: ' + error.message;
+        cell.appendChild(failure);
       }
     }
 
-    var baselineButton = document.getElementById('btnValidateBaseline');
-    var reposButton = document.getElementById('btnValidateRepos');
-    baselineButton.addEventListener('click', function () {
-      run(baselineButton, document.getElementById('baselineResult'), urls.baseline, ['架构', '结果']);
+    document.querySelectorAll('.auto-check').forEach(function (cell) {
+      runCheck(cell);
     });
-    reposButton.addEventListener('click', function () {
-      run(reposButton, document.getElementById('reposResult'), urls.repos, ['架构', '仓库组', '仓库', '结果']);
+
+    var repoBoxes = Array.prototype.slice.call(document.querySelectorAll('.repo-check'));
+    var selectionCount = document.getElementById('repoSelectionCount');
+
+    function updateRepoCount() {
+      if (!selectionCount) return;
+      var selected = repoBoxes.filter(function (box) { return box.checked; }).length;
+      selectionCount.textContent = '已选 ' + selected + ' / ' + repoBoxes.length + ' 个仓库';
+    }
+
+    document.querySelectorAll('.repo-group-card').forEach(function (card) {
+      var groupCheck = card.querySelector('.group-check');
+      var boxes = Array.prototype.slice.call(card.querySelectorAll('.repo-check'));
+
+      function syncGroup() {
+        var selected = boxes.filter(function (box) { return box.checked; }).length;
+        groupCheck.checked = boxes.length > 0 && selected === boxes.length;
+        groupCheck.indeterminate = selected > 0 && selected < boxes.length;
+        updateRepoCount();
+      }
+
+      groupCheck.addEventListener('change', function () {
+        boxes.forEach(function (box) { box.checked = groupCheck.checked; });
+        syncGroup();
+      });
+      boxes.forEach(function (box) {
+        box.addEventListener('change', syncGroup);
+      });
+      syncGroup();
     });
+
+    updateRepoCount();
   })();
 </script>
 {% endblock %}

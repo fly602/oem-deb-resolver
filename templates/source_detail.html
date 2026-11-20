@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}{{ label }} · {{ version.name }} · OEM 升级包中心{% endblock %}
+{% block style %}
+    .filter-bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 16px; }
+    .filter-bar label { display: flex; align-items: center; gap: 6px; font-size: 13.5px; }
+    .filter-bar select { width: auto; min-width: 100px; }
+    .filter-bar input[type=text] { width: 280px; }
+    .table-scroll { max-height: 70vh; overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+    .table-scroll table { border: 0; border-radius: 0; }
+    .table-scroll thead th { position: sticky; top: 0; z-index: 1; }
+    .pager { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
+    .pager-links { display: flex; gap: 6px; flex-wrap: wrap; }
+    .pager-links a { display: inline-block; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); text-decoration: none; font-size: 13px; }
+    .pager-links a:hover { background: #f3f4f6; }
+    .pager-links a.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .url-line { word-break: break-all; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 13px; }
+    .nowrap { white-space: nowrap; }
+{% endblock %}
+{% block content %}
+<header class="page">
+  <div>
+    <h1>{{ label }}</h1>
+    <p>
+      {{ version.name }} ·
+      {% if kind == 'baseline' %}基线清单{% else %}补丁仓库{% endif %} ·
+      架构 {{ arch }}
+    </p>
+  </div>
+  <div class="actions" style="margin-top:0">
+    <a class="btn" href="{{ url_for('version_detail', version_id=version.id) }}">返回版本</a>
+    <a class="btn" href="{{ url_for('index') }}">主页</a>
+  </div>
+</header>
+
+<div class="panel">
+  <div class="chips" style="margin-bottom:10px">
+    <span class="chip">类型 <strong>{{ '基线清单' if kind == 'baseline' else '补丁仓库' }}</strong></span>
+    <span class="chip">架构 <strong>{{ arch }}</strong></span>
+    <span class="chip">共 <strong>{{ total }}</strong> 个包</span>
+    {% if kind == 'repo' %}<span class="chip">仓库组 <strong>{{ version.groups[group_index].name }}</strong></span>{% endif %}
+  </div>
+  <div class="url-line">
+    链接地址：
+    {% if url.startswith('http') %}
+    <a href="{{ url }}" target="_blank" rel="noopener" title="{{ url }}">{{ url }}</a>
+    {% else %}
+    {{ url or '—' }}
+    {% endif %}
+  </div>
+
+  <form method="get" action="{{ url_for('version_source_detail', version_id=version.id) }}" class="filter-bar">
+    <input type="hidden" name="kind" value="{{ kind }}">
+    {% if kind == 'repo' %}
+    <input type="hidden" name="group" value="{{ group_index }}">
+    <input type="hidden" name="repo" value="{{ repo_index }}">
+    {% endif %}
+    <label>架构
+      <select name="arch" onchange="this.form.submit()">
+        {% for option in arch_options %}
+        <option value="{{ option }}" {% if option == arch %}selected{% endif %}>{{ option }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <input type="text" name="q" value="{{ q }}" placeholder="包名或版本模糊搜索">
+    <label>每页
+      <select name="per_page" onchange="this.form.submit()">
+        {% for value, text in [('50','50'), ('100','100'), ('500','500'), ('1000','1000'), ('all','全部')] %}
+        <option value="{{ value }}" {% if per_page == value %}selected{% endif %}>{{ text }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit" class="primary">查询</button>
+    {% if kind == 'repo' %}
+    <a class="btn" href="{{ url_for('version_source_detail', version_id=version.id, kind='repo', group=group_index, repo=repo_index, arch=arch) }}">重置</a>
+    {% else %}
+    <a class="btn" href="{{ url_for('version_source_detail', version_id=version.id, kind='baseline', arch=arch) }}">重置</a>
+    {% endif %}
+  </form>
+</div>
+
+{% if error %}
+<div class="box error"><h3>读取失败</h3><p style="margin:0">{{ error }}</p></div>
+{% endif %}
+
+{% if not error %}
+{% if shown %}
+<div class="table-scroll">
+  <table>
+    <thead>
+      <tr>
+        <th>包名</th><th>版本</th>
+        {% if kind == 'repo' %}<th>架构</th><th class="num">大小</th><th>文件</th>{% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in shown %}
+      <tr>
+        <td class="mono">{{ row.name }}</td>
+        <td class="mono nowrap">{{ row.version }}</td>
+        {% if kind == 'repo' %}
+        <td class="mono nowrap">{{ row.architecture }}</td>
+        <td class="num">{{ row.size|filesize }}</td>
+        <td class="mono" style="font-size:12px">{{ row.filename }}</td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">没有匹配的包。</div>
+{% endif %}
+
+<div class="pager">
+  <span class="muted">
+    共 {{ total }} 个包{% if total %}，当前 {{ start_index }}-{{ end_index }}{% endif %}
+  </span>
+  {% if total_pages > 1 %}
+  <div class="pager-links">
+    {% if prev_url %}<a href="{{ prev_url }}">上一页</a>{% endif %}
+    {% for item in page_links %}
+    <a href="{{ item.url }}" class="{% if item.number == page %}active{% endif %}">{{ item.number }}</a>
+    {% endfor %}
+    {% if next_url %}<a href="{{ next_url }}">下一页</a>{% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}
