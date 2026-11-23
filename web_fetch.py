@@ -2619,15 +2619,6 @@ def about_update():
         return jsonify(
             {"status": "running", "message": f"更新已在进行中（pid {running}）"}
         )
-    latest, source = _fetch_latest_version()
-    if latest and compare_versions(latest, APP_VERSION) <= 0:
-        return jsonify(
-            {
-                "status": "latest",
-                "message": f"已是最新版本 v{APP_VERSION}，无需更新",
-                "latest": latest,
-            }
-        )
     log_path = _update_log()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -2651,9 +2642,7 @@ def about_update():
     return jsonify(
         {
             "status": "started",
-            "message": f"已开始更新到 v{latest}（当前 v{APP_VERSION}），服务将在完成后自动重启",
-            "latest": latest,
-            "source": source,
+            "message": f"已开始更新（当前 v{APP_VERSION}），服务将在完成后自动重启",
             "pid": process.pid,
         }
     )
