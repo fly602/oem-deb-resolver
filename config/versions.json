@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "versions": [
+    {
+      "id": "2500u1",
+      "name": "2500u1",
+      "base_list": "https://cdimage.uniontech.com/daily-iso/2500-update1/professional/daily-stable/20260803-stable/",
+      "arch": "all",
+      "groups": [
+        {
+          "name": "dde",
+          "description": "dde 维护的补丁仓库",
+          "maintainer": "符乐艺",
+          "repos": [
+            "deb [trusted=yes] https://aptly.uniontech.com/pkg/snipe-2500u1/release-candidate/MzcyMTkxLeWFieaEn-mHjeaehDIwMjYtMDgtMDQgMTY6NTY6NTU unstable main"
+          ]
+        }
+      ],
+      "created_at": "2026-11-19T07:47:49+00:00",
+      "description": "2500u1 release维护仓库",
+      "admin": "符乐艺"
+    },
+    {
+      "id": "2500u2",
+      "name": "2500u2",
+      "base_list": "https://cdimage.uniontech.com/daily-iso/2500-update2/professional/daily-stable/20261117-stable/",
+      "arch": "all",
+      "groups": [
+        {
+          "name": "dde",
+          "description": "dde 维护的补丁仓库",
+          "maintainer": "符乐艺",
+          "repos": [
+            "deb [trusted=yes] https://aptly.uniontech.com/pkg/snipe-2500u1/release-candidate/RERFLTI1MDBVMi3nu7TmiqQyMDI2LTExLTE4IDE0OjIzOjM2 unstable main"
+          ]
+        }
+      ],
+      "created_at": "2026-11-19T08:08:49+00:00",
+      "description": "2500u2 release维护仓库",
+      "admin": "符乐艺"
+    },
+    {
+      "id": "2500u2-pajil",
+      "name": "2500U2-pajil",
+      "base_list": "https://cdimage.uniontech.com/daily-iso/2500-update2/professional/daily-stable/20261117-stable/",
+      "arch": "all",
+      "groups": [
+        {
+          "name": "dde",
+          "description": "dde 维护的补丁仓库",
+          "maintainer": "吕培龙",
+          "repos": [
+            "deb  [trusted=yes] https://aptly.uniontech.com/pkg/snipe-2500u2/release-candidate/UEFKSUwtMjUwMFUyMjAyNi0wOS0yNCAxNDowNDo1OA/  unstable main"
+          ]
+        }
+      ],
+      "created_at": "2026-11-20T03:34:47+00:00",
+      "description": "2500u2 平安项目维护仓库",
+      "admin": "吕培龙，熊志兵"
+    }
+  ]
+}
