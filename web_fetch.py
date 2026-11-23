@@ -54,11 +54,21 @@ from oem_deb_fetch import (
     parse_repo_spec,
     resolve_baseline_source,
 )
+from notes import (
+    NotesError as NotesFetchError,
+    filter_report as notes_filter_report,
+    is_configured as notes_is_configured,
+    load_bundle as notes_load_bundle,
+    merge_config as notes_merge_config,
+    period_label as notes_period_label,
+)
 
 WORKDIR = Path(__file__).resolve().parent
 CACHE_DIR = WORKDIR / "cache" / "fetch"
 VERSION_CACHE = CACHE_DIR / "versions"
 JOB_DIR = CACHE_DIR / "jobs"
+NOTES_CACHE = WORKDIR / "cache" / "notes"
+NOTES_LOCAL_FILE = WORKDIR / "config" / "notes.local.json"
 DATA_DIR = WORKDIR / "config"
 VERSIONS_FILE = DATA_DIR / "versions.json"
 VERSION_FILE = WORKDIR / "VERSION"
@@ -84,7 +94,7 @@ app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
 
 
 def _ensure_dirs() -> None:
-    for path in (VERSION_CACHE, JOB_DIR, DATA_DIR):
+    for path in (VERSION_CACHE, JOB_DIR, DATA_DIR, NOTES_CACHE):
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -238,6 +248,100 @@ def _zip_tree(root: Path, zip_path: Path) -> None:
                 archive.write(path, path.relative_to(root))
 
 
+# ─── 更新注记 ──────────────────────────────────────────────────────────────────
+
+NOTE_FIELDS = ("url", "ref", "dir", "sources")
+_NOTES_STATE_MEMO: dict[str, tuple[float, dict]] = {}
+
+
+def _notes_local() -> dict:
+    try:
+        data = json.loads(NOTES_LOCAL_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _notes_token() -> str:
+    token = os.environ.get("OEM_GITLAB_TOKEN", "").strip()
+    if token:
+        return token
+    local = _notes_local()
+    return str(local.get("token", "")).strip()
+
+
+def _notes_global_config() -> dict:
+    local = _notes_local()
+    return notes_merge_config(
+        {
+            "url": local.get("url", ""),
+            "ref": local.get("ref", ""),
+            "dir": local.get("dir", ""),
+            "sources": local.get("sources", []),
+        }
+    )
+
+
+def _notes_has_fields(raw) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    for field in NOTE_FIELDS:
+        value = raw.get(field)
+        if isinstance(value, (list, tuple)):
+            if any(str(item).strip() for item in value):
+                return True
+        elif str(value or "").strip():
+            return True
+    return False
+
+
+def _repo_notes(group: dict) -> list[dict | None]:
+    raw = group.get("repo_notes")
+    repos = group.get("repos", [])
+    items = raw if isinstance(raw, list) else []
+    result: list[dict | None] = []
+    for index in range(len(repos)):
+        item = items[index] if index < len(items) else None
+        result.append(item if isinstance(item, dict) and item else None)
+    return result
+
+
+def _notes_config(version: dict, group: dict | None = None, repo_index: int | None = None) -> dict:
+    """按「组填了用组、组空则按仓库」解析一处的注记配置。"""
+    layers: list[dict | None] = [_notes_global_config(), version.get("notes")]
+    group_notes = group.get("notes") if isinstance(group, dict) else None
+    if _notes_has_fields(group_notes):
+        layers.append(group_notes)
+    elif isinstance(group, dict) and repo_index is not None:
+        repo_items = _repo_notes(group)
+        if repo_index < len(repo_items):
+            layers.append(repo_items[repo_index])
+    return notes_merge_config(*layers)
+
+
+def _notes_state(config: dict) -> dict:
+    if not notes_is_configured(config):
+        return {"available": False, "reason": "未配置更新注记源", "label": "", "latest": ""}
+    key = json.dumps(config, sort_keys=True, ensure_ascii=False)
+    now = time.time()
+    cached = _NOTES_STATE_MEMO.get(key)
+    if cached and now - cached[0] < 300:
+        return cached[1]
+    try:
+        bundle = notes_load_bundle(config, NOTES_CACHE, _notes_token())
+        periods = bundle.periods()
+        state = {
+            "available": True,
+            "reason": "",
+            "latest": periods[0],
+            "label": notes_period_label(periods[0]),
+        }
+    except NotesFetchError as exc:
+        state = {"available": False, "reason": str(exc), "latest": "", "label": ""}
+    _NOTES_STATE_MEMO[key] = (now, state)
+    return state
+
+
 # ─── 版本持久化 ────────────────────────────────────────────────────────────────
 
 
@@ -284,6 +388,16 @@ def _version_id(name: str, versions: list[dict]) -> str:
     return candidate
 
 
+def _notes_form_data(raw) -> dict:
+    merged = notes_merge_config(raw if isinstance(raw, dict) else None)
+    return {
+        "url": merged["url"],
+        "ref": merged["ref"],
+        "dir": merged["dir"],
+        "sources": ", ".join(merged["sources"]),
+    }
+
+
 def _version_form_data(version: dict | None) -> dict:
     if version is None:
         return {
@@ -292,6 +406,7 @@ def _version_form_data(version: dict | None) -> dict:
             "admin": "",
             "base_list": "",
             "arch": "amd64",
+            "notes": _notes_form_data(None),
             "groups": [_empty_group_form()],
         }
     return {
@@ -300,12 +415,15 @@ def _version_form_data(version: dict | None) -> dict:
         "admin": version.get("admin", ""),
         "base_list": version["base_list"],
         "arch": version.get("arch", "amd64"),
+        "notes": _notes_form_data(version.get("notes")),
         "groups": [
             {
                 "name": group["name"],
                 "description": group.get("description", ""),
                 "maintainer": group.get("maintainer", ""),
                 "repos": "\n".join(group["repos"]),
+                "notes": _notes_form_data(group.get("notes")),
+                "repo_notes": _repo_notes_form_text(group),
             }
             for group in version.get("groups", [])
         ]
@@ -313,8 +431,22 @@ def _version_form_data(version: dict | None) -> dict:
     }
 
 
+def _repo_notes_form_text(group: dict) -> str:
+    lines: list[str] = []
+    for item in _repo_notes(group):
+        lines.append(json.dumps(item, ensure_ascii=False) if item else "")
+    return "\n".join(lines)
+
+
 def _empty_group_form() -> dict:
-    return {"name": "", "description": "", "maintainer": "", "repos": ""}
+    return {
+        "name": "",
+        "description": "",
+        "maintainer": "",
+        "repos": "",
+        "notes": _notes_form_data(None),
+        "repo_notes": "",
+    }
 
 
 def _submitted_form_data(form) -> dict:
@@ -322,12 +454,28 @@ def _submitted_form_data(form) -> dict:
     descriptions = form.getlist("group_description")
     maintainers = form.getlist("group_maintainer")
     repos = form.getlist("group_repos")
+    notes_urls = form.getlist("group_notes_url")
+    notes_refs = form.getlist("group_notes_ref")
+    notes_dirs = form.getlist("group_notes_dir")
+    notes_sources = form.getlist("group_notes_sources")
+    repo_notes = form.getlist("group_repo_notes")
+
+    def pick(values: list[str], index: int) -> str:
+        return values[index] if index < len(values) else ""
+
     groups = [
         {
             "name": name,
-            "description": descriptions[index] if index < len(descriptions) else "",
-            "maintainer": maintainers[index] if index < len(maintainers) else "",
-            "repos": repos[index] if index < len(repos) else "",
+            "description": pick(descriptions, index),
+            "maintainer": pick(maintainers, index),
+            "repos": pick(repos, index),
+            "notes": {
+                "url": pick(notes_urls, index),
+                "ref": pick(notes_refs, index),
+                "dir": pick(notes_dirs, index),
+                "sources": pick(notes_sources, index),
+            },
+            "repo_notes": pick(repo_notes, index),
         }
         for index, name in enumerate(names)
     ]
@@ -337,6 +485,12 @@ def _submitted_form_data(form) -> dict:
         "admin": form.get("admin", ""),
         "base_list": form.get("base_list", ""),
         "arch": form.get("architecture", "amd64"),
+        "notes": {
+            "url": form.get("notes_url", ""),
+            "ref": form.get("notes_ref", ""),
+            "dir": form.get("notes_dir", ""),
+            "sources": form.get("notes_sources", ""),
+        },
         "groups": groups or [_empty_group_form()],
     }
 
@@ -358,6 +512,15 @@ def _version_from_form(form) -> dict:
     group_repos = form.getlist("group_repos")
     group_descriptions = form.getlist("group_description")
     group_maintainers = form.getlist("group_maintainer")
+    group_notes_urls = form.getlist("group_notes_url")
+    group_notes_refs = form.getlist("group_notes_ref")
+    group_notes_dirs = form.getlist("group_notes_dir")
+    group_notes_sources = form.getlist("group_notes_sources")
+    group_repo_notes = form.getlist("group_repo_notes")
+
+    def pick(values: list[str], index: int) -> str:
+        return values[index] if index < len(values) else ""
+
     groups: list[dict] = []
     for index, (group_name, repo_text) in enumerate(
         zip(group_names, group_repos), 1
@@ -386,19 +549,31 @@ def _version_from_form(form) -> dict:
             raise ValueError(f"仓库组「{group_name}」至少需要一个补丁仓库")
         for repo in repos:
             parse_repo_spec(repo)  # 只做格式校验
-        groups.append(
-            {
-                "name": group_name,
-                "description": group_description,
-                "maintainer": group_maintainer,
-                "repos": repos,
-            }
+        entry = {
+            "name": group_name,
+            "description": group_description,
+            "maintainer": group_maintainer,
+            "repos": repos,
+        }
+        group_notes = _notes_from_fields(
+            pick(group_notes_urls, index - 1),
+            pick(group_notes_refs, index - 1),
+            pick(group_notes_dirs, index - 1),
+            pick(group_notes_sources, index - 1),
         )
+        if group_notes:
+            entry["notes"] = group_notes
+        repo_notes = _repo_notes_from_text(
+            pick(group_repo_notes, index - 1), len(repos), group_name
+        )
+        if repo_notes:
+            entry["repo_notes"] = repo_notes
+        groups.append(entry)
 
     if not groups:
         raise ValueError("请至少添加一个补丁仓库组")
     detected = detect_arch_from_baseline(base_list)
-    return {
+    version = {
         "name": name,
         "description": form.get("description", "").strip()[:500],
         "admin": form.get("admin", "").strip()[:200],
@@ -406,6 +581,51 @@ def _version_from_form(form) -> dict:
         "arch": detected or arch,
         "groups": groups,
     }
+    version_notes = _notes_from_fields(
+        form.get("notes_url", ""),
+        form.get("notes_ref", ""),
+        form.get("notes_dir", ""),
+        form.get("notes_sources", ""),
+    )
+    if version_notes:
+        version["notes"] = version_notes
+    return version
+
+
+def _notes_from_fields(url: str, ref: str, dir_name: str, sources: str) -> dict:
+    merged = notes_merge_config(
+        {"url": url, "ref": ref, "dir": dir_name, "sources": sources}
+    )
+    if not any(merged[field] for field in NOTE_FIELDS):
+        return {}
+    return merged
+
+
+def _repo_notes_from_text(text: str, repo_count: int, group_name: str) -> list[dict | None]:
+    lines = text.splitlines()
+    items: list[dict | None] = []
+    for line in lines[:repo_count]:
+        stripped = line.strip()
+        if not stripped:
+            items.append(None)
+            continue
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"仓库组「{group_name}」第 {len(items) + 1} 行注记配置不是合法 JSON：{exc.msg}"
+            ) from exc
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"仓库组「{group_name}」第 {len(items) + 1} 行注记配置必须是 JSON 对象"
+            )
+        merged = notes_merge_config(data)
+        items.append(merged if any(merged[field] for field in NOTE_FIELDS) else None)
+    while len(items) < repo_count:
+        items.append(None)
+    if not any(items):
+        return []
+    return items
 
 
 def _cleanup_checks(version_id: str) -> None:
@@ -594,6 +814,8 @@ def version_create():
         "groups": data["groups"],
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    if data.get("notes"):
+        version["notes"] = data["notes"]
     versions.append(version)
     _save_versions(versions)
     return redirect(url_for("version_detail", version_id=version["id"]))
@@ -662,6 +884,8 @@ def version_detail(version_id: str):
     repo_count = 0
     for group_index, group in enumerate(version["groups"]):
         repos = []
+        group_notes_mode = _notes_has_fields(group.get("notes"))
+        group_state = _notes_state(_notes_config(version, group)) if group_notes_mode else None
         for repo_index, spec in enumerate(group["repos"]):
             repo_count += 1
             try:
@@ -671,15 +895,26 @@ def version_detail(version_id: str):
             except ValueError:
                 url = spec
                 short = spec
-            repos.append(
-                {
-                    "serial": repo_index + 1,
-                    "group_index": group_index,
-                    "repo_index": repo_index,
-                    "url": url,
-                    "short": short,
-                }
-            )
+            entry = {
+                "serial": repo_index + 1,
+                "group_index": group_index,
+                "repo_index": repo_index,
+                "url": url,
+                "short": short,
+                "notes_state": None,
+                "notes_url": "",
+            }
+            if not group_notes_mode:
+                state = _notes_state(_notes_config(version, group, repo_index))
+                entry["notes_state"] = state
+                if state["available"]:
+                    entry["notes_url"] = url_for(
+                        "version_notes",
+                        version_id=version_id,
+                        group=group_index,
+                        repo=repo_index,
+                    )
+            repos.append(entry)
         repo_groups.append(
             {
                 "index": group_index,
@@ -687,6 +922,12 @@ def version_detail(version_id: str):
                 "description": group.get("description", ""),
                 "maintainer": group.get("maintainer", ""),
                 "repos": repos,
+                "notes_state": group_state,
+                "notes_url": url_for(
+                    "version_notes", version_id=version_id, group=group_index
+                )
+                if group_state and group_state["available"]
+                else "",
             }
         )
     baseline_rows = []
@@ -889,6 +1130,119 @@ def version_source_detail(version_id: str):
     )
 
 
+def _notes_target(version: dict) -> tuple[dict | None, dict]:
+    group_index = request.args.get("group", type=int)
+    repo_index = request.args.get("repo", type=int)
+    groups = version.get("groups", [])
+    if group_index is None:
+        abort(404)
+    if group_index < 0 or group_index >= len(groups):
+        abort(404)
+    group = groups[group_index]
+    if repo_index is not None:
+        if not _notes_has_fields(group.get("notes")):
+            if repo_index < 0 or repo_index >= len(group.get("repos", [])):
+                abort(404)
+        elif repo_index < 0 or repo_index >= len(group.get("repos", [])):
+            abort(404)
+    config = _notes_config(version, group, repo_index)
+    return group, {
+        "group_index": group_index,
+        "repo_index": repo_index,
+        "config": config,
+    }
+
+
+def _notes_scope_label(version: dict, target: dict) -> str:
+    group = version["groups"][target["group_index"]]
+    label = f"仓库组 {group['name']}"
+    if target["repo_index"] is not None:
+        spec = group["repos"][target["repo_index"]]
+        try:
+            label += f" · {_repo_short_label(parse_repo_spec(spec).url)}"
+        except ValueError:
+            label += f" · {spec[:40]}"
+    return label
+
+
+@app.route("/versions/<version_id>/notes", methods=["GET"])
+def version_notes(version_id: str):
+    version = _get_version(version_id)
+    group, target = _notes_target(version)
+    period = request.args.get("period", "").strip()
+    config = target["config"]
+    base = {
+        "version": version,
+        "group": group,
+        "scope": _notes_scope_label(version, target),
+        "config": config,
+        "args": {
+            "group": group["name"],
+            "group_index": target["group_index"],
+            "repo_index": target["repo_index"],
+        },
+        "export_url": url_for(
+            "version_notes_export",
+            version_id=version_id,
+            group=target["group_index"],
+            **(
+                {"repo": target["repo_index"]}
+                if target["repo_index"] is not None
+                else {}
+            ),
+        ),
+        "notes_url": url_for(
+            "version_notes",
+            version_id=version_id,
+            group=target["group_index"],
+            **(
+                {"repo": target["repo_index"]}
+                if target["repo_index"] is not None
+                else {}
+            ),
+        ),
+    }
+    if not notes_is_configured(config):
+        return (
+            render_template(
+                "notes.html",
+                data=None,
+                error="未配置更新注记源：请在版本或仓库组里填写「注记来源 URL」。",
+                **base,
+            ),
+            200,
+        )
+    try:
+        bundle = notes_load_bundle(config, NOTES_CACHE, _notes_token())
+        data = bundle.load(period or None)
+    except NotesFetchError as exc:
+        return render_template("notes.html", data=None, error=str(exc), **base), 200
+    return render_template("notes.html", data=data, error="", **base)
+
+
+@app.route("/versions/<version_id>/notes/export", methods=["GET"])
+def version_notes_export(version_id: str):
+    version = _get_version(version_id)
+    _, target = _notes_target(version)
+    config = target["config"]
+    if not notes_is_configured(config):
+        abort(404)
+    try:
+        bundle = notes_load_bundle(config, NOTES_CACHE, _notes_token())
+        payload = bundle.export_zip(version["name"])
+    except (NotesFetchError, OSError) as exc:
+        abort(404, description=str(exc))
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    slug = _ascii_slug(version["name"], "version")
+    folder = config.get("dir") or "notes"
+    return send_file(
+        payload,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"oem-notes-{slug}-{_ascii_slug(folder, 'notes')}-{stamp}.zip",
+    )
+
+
 @app.route("/versions/<version_id>/edit", methods=["GET"])
 def version_edit(version_id: str):
     version = _get_version(version_id)
@@ -922,6 +1276,8 @@ def version_update(version_id: str):
     for item in versions:
         if item.get("id") == version_id:
             item.update(data)
+            if "notes" not in data:
+                item.pop("notes", None)
             break
     _save_versions(versions)
     return redirect(url_for("version_detail", version_id=version_id))
@@ -1048,15 +1404,26 @@ def version_validate_repos(version_id: str):
 
 
 
+def _repo_notes_map(group: dict) -> dict[str, dict]:
+    mapping: dict[str, dict] = {}
+    for spec, item in zip(group.get("repos", []), _repo_notes(group)):
+        if item:
+            mapping[spec] = item
+    return mapping
+
+
 def _merge_version_config(existing: dict, imported: dict) -> dict:
     """同名版本合并：保留现有配置，只追加缺失的仓库组和仓库。"""
     merged = dict(existing)
     for key in ("name", "description", "admin", "base_list", "arch", "created_at"):
         if not merged.get(key) and imported.get(key):
             merged[key] = imported[key]
+    if not _notes_has_fields(merged.get("notes")) and _notes_has_fields(imported.get("notes")):
+        merged["notes"] = imported["notes"]
 
     groups: list[dict] = []
     group_index: dict[str, dict] = {}
+    repo_notes_map: dict[str, dict[str, dict]] = {}
     for group in existing.get("groups", []):
         copy = {
             "name": group["name"],
@@ -1064,8 +1431,11 @@ def _merge_version_config(existing: dict, imported: dict) -> dict:
             "maintainer": group.get("maintainer", ""),
             "repos": list(dict.fromkeys(group.get("repos", []))),
         }
+        if _notes_has_fields(group.get("notes")):
+            copy["notes"] = group["notes"]
         groups.append(copy)
         group_index[copy["name"]] = copy
+        repo_notes_map[copy["name"]] = _repo_notes_map(group)
     for group in imported.get("groups", []):
         target = group_index.get(group["name"])
         if target is None:
@@ -1075,15 +1445,28 @@ def _merge_version_config(existing: dict, imported: dict) -> dict:
                 "maintainer": group.get("maintainer", ""),
                 "repos": [],
             }
+            if _notes_has_fields(group.get("notes")):
+                target["notes"] = group["notes"]
             groups.append(target)
             group_index[group["name"]] = target
+            repo_notes_map.setdefault(group["name"], {})
         else:
             for key in ("description", "maintainer"):
                 if not target.get(key) and group.get(key):
                     target[key] = group[key]
+            if not _notes_has_fields(target.get("notes")) and _notes_has_fields(group.get("notes")):
+                target["notes"] = group["notes"]
+        imported_notes = _repo_notes_map(group)
+        for spec in imported_notes:
+            repo_notes_map.setdefault(group["name"], {}).setdefault(spec, imported_notes[spec])
         for repo in group["repos"]:
             if repo not in target["repos"]:
                 target["repos"].append(repo)
+    for group in groups:
+        mapping = repo_notes_map.get(group["name"]) or {}
+        items = [mapping.get(spec) for spec in group["repos"]]
+        if any(items):
+            group["repo_notes"] = items
     merged["groups"] = groups
     return merged
 
@@ -1117,6 +1500,9 @@ def _parse_imported_versions(payload) -> list[dict]:
         detected = detect_arch_from_baseline(base_list)
         if detected:
             arch = detected
+        version_notes = notes_merge_config(
+            raw.get("notes") if isinstance(raw.get("notes"), dict) else None
+        )
 
         groups_raw = raw.get("groups")
         if not isinstance(groups_raw, list) or not groups_raw:
@@ -1136,35 +1522,57 @@ def _parse_imported_versions(payload) -> list[dict]:
                 raise ValueError(f"版本 {name} 第 {group_index} 个仓库组缺少名称或仓库")
             for repo in repos:
                 parse_repo_spec(repo)
-            groups.append(
-                {
-                    "name": group_name,
-                    "description": str(group.get("description", "")).strip()[:500],
-                    "maintainer": str(group.get("maintainer", "")).strip()[:200],
-                    "repos": repos,
-                }
+            entry = {
+                "name": group_name,
+                "description": str(group.get("description", "")).strip()[:500],
+                "maintainer": str(group.get("maintainer", "")).strip()[:200],
+                "repos": repos,
+            }
+            group_notes = notes_merge_config(
+                group.get("notes") if isinstance(group.get("notes"), dict) else None
             )
+            if any(group_notes[field] for field in NOTE_FIELDS):
+                entry["notes"] = group_notes
+            repo_notes_raw = group.get("repo_notes")
+            if isinstance(repo_notes_raw, list):
+                items: list[dict | None] = []
+                for item in repo_notes_raw[: len(repos)]:
+                    if not isinstance(item, dict):
+                        items.append(None)
+                        continue
+                    merged_item = notes_merge_config(item)
+                    items.append(
+                        merged_item
+                        if any(merged_item[field] for field in NOTE_FIELDS)
+                        else None
+                    )
+                while len(items) < len(repos):
+                    items.append(None)
+                if any(items):
+                    entry["repo_notes"] = items
+            groups.append(entry)
 
         version_id = re.sub(
             r"[^A-Za-z0-9._-]+", "-", str(raw.get("id", "")).strip()
         ).strip("-._")
         if not version_id:
             version_id = _ascii_slug(name, "version")
-        versions.append(
-            {
-                "id": version_id,
-                "name": name,
-                "description": str(raw.get("description", "")).strip()[:500],
-                "admin": str(raw.get("admin", "")).strip()[:200],
-                "base_list": base_list,
-                "arch": arch,
-                "groups": groups,
-                "created_at": str(
-                    raw.get("created_at")
-                    or datetime.now(timezone.utc).isoformat(timespec="seconds")
-                ),
-            }
-        )
+        entry = {
+            "id": version_id,
+            "name": name,
+            "description": str(raw.get("description", "")).strip()[:500],
+            "admin": str(raw.get("admin", "")).strip()[:200],
+            "base_list": base_list,
+            "arch": arch,
+            "groups": groups,
+            "created_at": str(
+                raw.get("created_at")
+                or datetime.now(timezone.utc).isoformat(timespec="seconds")
+            ),
+        }
+        if any(version_notes[field] for field in NOTE_FIELDS):
+            entry["notes"] = version_notes
+        versions.append(entry)
     return versions
 
 
@@ -2009,6 +2417,7 @@ def _build_deploy_zip() -> io.BytesIO:
     files = [
         "oem_deb_fetch.py",
         "web_fetch.py",
+        "notes.py",
         "run-fetch-web.sh",
         "oem-launcher.sh",
         "install-desktop.sh",

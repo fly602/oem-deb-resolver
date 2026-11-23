@@ -17,6 +17,7 @@ env/
 # Default version config ships with the repo; keep runtime leftovers out
 config/*
 !config/versions.json
+config/notes.local.json
 
 # Cache
 cache/

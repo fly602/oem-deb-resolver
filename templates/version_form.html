@@ -56,6 +56,18 @@
   </div>
 
   <div class="field">
+    <label class="title">更新注记来源（可选）</label>
+    <div class="notes-fields">
+      <input type="text" name="notes_url" value="{{ form.notes.url or '' }}"
+             placeholder="注记仓库地址，如 https://gitlabwh.uniontech.com/ut000900/crp-update-report">
+      <input type="text" name="notes_ref" value="{{ form.notes.ref or '' }}" placeholder="分支（默认仓库默认分支）">
+      <input type="text" name="notes_dir" value="{{ form.notes.dir or '' }}" placeholder="目录名，如 v25updateu1">
+      <input type="text" name="notes_sources" value="{{ form.notes.sources or '' }}" placeholder="只显示这些上游仓库，逗号分隔（可空）">
+    </div>
+    <p class="hint">仓库组自己填了注记配置时以组为准；组留空则逐仓库按这里的配置查。全部留空则不显示更新注记。</p>
+  </div>
+
+  <div class="field">
     <label class="title">补丁仓库组</label>
     <p class="hint" style="margin-top:0">每组一个自定义名称（如 dde、系统、窗管），组内每行一个 sources.list 仓库。检查时逐个仓库统计。</p>
     <div id="groups">
@@ -72,6 +84,18 @@
                  placeholder="维护人员（可选，不在列表显示）">
         </div>
         <textarea name="group_repos" placeholder="deb [trusted=yes] https://aptly.example.com/pkg/xxx unstable main">{{ group.repos }}</textarea>
+        <details class="group-notes">
+          <summary>更新注记配置（可选）</summary>
+          <div class="notes-fields" style="margin-top:8px">
+            <input type="text" name="group_notes_url" value="{{ group.notes.url or '' }}" placeholder="注记仓库地址（留空继承版本）">
+            <input type="text" name="group_notes_ref" value="{{ group.notes.ref or '' }}" placeholder="分支（可空）">
+            <input type="text" name="group_notes_dir" value="{{ group.notes.dir or '' }}" placeholder="目录名，如 v25updateu1">
+            <input type="text" name="group_notes_sources" value="{{ group.notes.sources or '' }}" placeholder="只显示这些上游仓库，逗号分隔（可空）">
+          </div>
+          <p class="hint" style="margin:8px 0 4px">组填了任意一项 → 整组统一用这份配置，仓库级配置被忽略。</p>
+          <textarea name="group_repo_notes" rows="2" class="mono"
+                    placeholder='仓库级配置，每行对应上面一个仓库：{"sources":["qt6-base"]}（可空行）'>{{ group.repo_notes or '' }}</textarea>
+        </details>
       </div>
       {% endfor %}
     </div>
@@ -143,7 +167,17 @@
         '<textarea name="group_description" class="prose" rows="2" maxlength="500" placeholder="组描述（可选，不在列表显示）"></textarea>' +
         '<input type="text" name="group_maintainer" maxlength="200" placeholder="维护人员（可选，不在列表显示）">' +
         '</div>' +
-        '<textarea name="group_repos" placeholder="deb [trusted=yes] https://aptly.example.com/pkg/xxx unstable main"></textarea>';
+        '<textarea name="group_repos" placeholder="deb [trusted=yes] https://aptly.example.com/pkg/xxx unstable main"></textarea>' +
+        '<details class="group-notes"><summary>更新注记配置（可选）</summary>' +
+        '<div class="notes-fields" style="margin-top:8px">' +
+        '<input type="text" name="group_notes_url" placeholder="注记仓库地址（留空继承版本）">' +
+        '<input type="text" name="group_notes_ref" placeholder="分支（可空）">' +
+        '<input type="text" name="group_notes_dir" placeholder="目录名，如 v25updateu1">' +
+        '<input type="text" name="group_notes_sources" placeholder="只显示这些上游仓库，逗号分隔（可空）">' +
+        '</div>' +
+        '<p class="hint" style="margin:8px 0 4px">组填了任意一项 → 整组统一用这份配置，仓库级配置被忽略。</p>' +
+        '<textarea name="group_repo_notes" rows="2" class="mono" placeholder=\'仓库级配置，每行对应上面一个仓库：{"sources":["qt6-base"]}（可空行）\'></textarea>' +
+        '</details>';
       container.appendChild(row);
       row.querySelector('input').focus();
     });

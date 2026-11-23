@@ -88,6 +88,13 @@
       <input type="checkbox" class="group-check" checked title="勾选/取消本组全部仓库" aria-label="选择仓库组 {{ group.name }}">
       <strong>{{ group.name }}</strong>
       <span class="chip">{{ group.repos|length }} 个仓库</span>
+      {% if group.notes_state %}
+        {% if group.notes_state.available %}
+        <a class="btn sm" href="{{ group.notes_url }}" title="最新一期 {{ group.notes_state.label }}">更新注记</a>
+        {% else %}
+        <span class="btn sm disabled" title="{{ group.notes_state.reason }}">更新注记</span>
+        {% endif %}
+      {% endif %}
       {% if group.description %}<span class="group-note" title="{{ group.description }}">描述 <span class="k">{{ group.description }}</span></span>{% endif %}
       {% if group.maintainer %}<span class="group-note">维护 <span class="k">{{ group.maintainer }}</span></span>{% endif %}
     </div>
@@ -116,6 +123,13 @@
               data-group="{{ group.index }}" data-repo="{{ repo.repo_index }}"><span class="muted">检查中…</span></td>
           <td>
             <div class="row-actions">
+              {% if repo.notes_state %}
+                {% if repo.notes_state.available %}
+                <a class="btn sm" href="{{ repo.notes_url }}" title="最新一期 {{ repo.notes_state.label }}">更新注记</a>
+                {% else %}
+                <span class="btn sm disabled" title="{{ repo.notes_state.reason }}">更新注记</span>
+                {% endif %}
+              {% endif %}
               <a class="btn sm" href="{{ url_for('version_source_detail', version_id=version.id, kind='repo', group=group.index, repo=repo.repo_index) }}">详情</a>
             </div>
           </td>

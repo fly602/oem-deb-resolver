@@ -41,6 +41,7 @@
     .btn.danger, button.danger { color: var(--error); border-color: #fda29b; background: #fff; }
     .btn.danger:hover, button.danger:hover { background: var(--error-soft); }
     .btn.sm { padding: 6px 12px; font-size: 13px; font-weight: 500; }
+    .btn.disabled, .btn.disabled:hover { color: var(--muted); background: #f3f4f6; border-color: var(--border); cursor: not-allowed; text-decoration: none; }
     .brand { display: flex; align-items: center; gap: 14px; }
     .brand-icon { width: 52px; height: 52px; flex: none; margin-top: 0; }
     .brand-kicker { margin-bottom: 2px; color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
@@ -124,6 +125,12 @@
     .group-meta { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; align-items: flex-start; }
     .group-meta input { flex: 1 1 200px; }
     .group-meta textarea { flex: 2 1 320px; min-height: 56px; }
+    .notes-fields { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 10px; }
+    .notes-fields input { min-width: 0; }
+    .group-notes { margin-top: 10px; }
+    .group-notes summary { font-size: 13px; color: var(--muted); }
+    .group-notes textarea { margin-top: 4px; min-height: 52px; }
+    @media (max-width: 900px) { .notes-fields { grid-template-columns: 1fr; } }
     textarea.prose { font-family: inherit; font-size: 14.5px; line-height: 1.6; }
     .desc-cell { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .group-note { color: var(--muted); font-size: 12.5px; }

@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}更新注记 · {{ version.name }} · OEM 升级包中心{% endblock %}
+{% block style %}
+    .notes-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+    .notes-body { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; }
+    .notes-body h1 { font-size: 20px; margin: 0 0 12px; }
+    .notes-body h2 { font-size: 16px; margin: 20px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+    .notes-body h3 { font-size: 14.5px; margin: 16px 0 6px; }
+    .notes-body ul { margin: 6px 0; padding-left: 22px; }
+    .notes-body li { margin: 3px 0; }
+    .notes-body blockquote { margin: 10px 0; padding: 8px 14px; border-left: 3px solid var(--border); color: var(--muted); background: #fafbfc; }
+    .notes-body hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
+    .notes-body table { margin: 10px 0; }
+    .period-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
+    .period-bar select { width: auto; min-width: 240px; }
+{% endblock %}
+{% block content %}
+<header class="page">
+  <div>
+    <h1>更新注记</h1>
+    <p>{{ version.name }} · {{ scope }}</p>
+  </div>
+  <div class="actions" style="margin-top:0">
+    {% if data %}
+    <a class="btn primary" href="{{ export_url }}">导出压缩包</a>
+    {% endif %}
+    <a class="btn" href="{{ url_for('version_detail', version_id=version.id) }}">返回版本</a>
+    <a class="btn" href="{{ url_for('index') }}">主页</a>
+  </div>
+</header>
+
+{% if error %}
+<div class="box error">
+  <h3>无法显示更新注记</h3>
+  <p style="margin:0">{{ error }}</p>
+</div>
+<div class="panel">
+  <p class="hint" style="margin:0">
+    注记来源：<code>{{ config.url or '未配置' }}</code>
+    {% if config.ref %} · 分支 <code>{{ config.ref }}</code>{% endif %}
+    {% if config.dir %} · 目录 <code>{{ config.dir }}</code>{% endif %}
+    {% if config.sources %} · 过滤仓库 <code>{{ config.sources|join(', ') }}</code>{% endif %}
+  </p>
+</div>
+{% endif %}
+
+{% if data %}
+<div class="period-bar">
+  <form method="get" action="{{ notes_url }}" style="margin:0">
+    <label class="title" for="period" style="display:inline-block; margin-right:8px">期次</label>
+    <select id="period" name="period" onchange="this.form.submit()">
+      {% for item in data.periods %}
+      <option value="{{ item.id }}" {% if item.id == data.period %}selected{% endif %}>{{ item.label }}</option>
+      {% endfor %}
+    </select>
+    <noscript><button type="submit" class="btn sm">切换</button></noscript>
+  </form>
+  <span class="chip">{{ data.periods|length }} 期</span>
+</div>
+
+<div class="notes-meta">
+  <span class="chip">期次 <strong>{{ data.period_label }}</strong></span>
+  {% if data.meta.crp_subject %}<span class="chip">CRP <strong>{{ data.meta.crp_subject }}</strong></span>{% endif %}
+  {% if data.meta.mode %}<span class="chip">模式 <strong>{{ '增量' if data.meta.mode == 'incremental' else data.meta.mode }}</strong></span>{% endif %}
+  {% if data.meta.total %}<span class="chip">仓库 <strong>{{ data.meta.total }}</strong></span>{% endif %}
+  <span class="chip">变更仓库 <strong>{{ data.meta.changed|length }}</strong></span>
+  {% if data.sources %}<span class="chip">过滤 <strong>{{ data.sources|join(', ') }}</strong></span>{% endif %}
+  {% if data.meta.changed %}<span class="chip">涉及 <strong>{{ data.meta.changed|join('、') }}</strong></span>{% endif %}
+</div>
+
+<div class="notes-body">
+  {{ data.note_html|safe }}
+</div>
+
+{% if data.report_html %}
+<h2>变更报告{% if data.sources %}（已按 {{ data.sources|join('、') }} 过滤）{% endif %}</h2>
+<details class="notes-body">
+  <summary class="muted" style="cursor:pointer; margin-bottom:8px">展开完整变更报告</summary>
+  {{ data.report_html|safe }}
+</details>
+{% endif %}
+
+<p class="hint" style="margin-top:16px">
+  来源 <code>{{ config.url }}</code>{% if config.ref %}（{{ config.ref }}）{% endif %}{% if config.dir %} · 目录 <code>{{ config.dir }}</code>{% endif %}
+  · 本期文件：{{ data.files|join('、') }}
+</p>
+{% endif %}
+{% endblock %}
