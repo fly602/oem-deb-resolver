@@ -2158,6 +2158,114 @@ def about_check_update():
     )
 
 
+def _update_script() -> Path:
+    return WORKDIR / "self-update.sh"
+
+
+def _update_log() -> Path:
+    return WORKDIR / "cache" / "self-update.log"
+
+
+def _update_pidfile() -> Path:
+    return WORKDIR / "cache" / "self-update.pid"
+
+
+def _update_running() -> int | None:
+    try:
+        pid = int(_update_pidfile().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return None
+    return pid
+
+
+@app.route("/about/update", methods=["POST"])
+def about_update():
+    if not _client_is_local():
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": "只允许在本机触发更新（请在服务器上打开本页面或通过 SSH 隧道访问）",
+                }
+            ),
+            403,
+        )
+    script = _update_script()
+    if not script.is_file():
+        return jsonify(
+            {
+                "status": "error",
+                "message": f"缺少更新脚本 {script}，请重新执行 install.sh 部署",
+            }
+        )
+    running = _update_running()
+    if running:
+        return jsonify(
+            {"status": "running", "message": f"更新已在进行中（pid {running}）"}
+        )
+    latest, source = _fetch_latest_version()
+    if latest and compare_versions(latest, APP_VERSION) <= 0:
+        return jsonify(
+            {
+                "status": "latest",
+                "message": f"已是最新版本 v{APP_VERSION}，无需更新",
+                "latest": latest,
+            }
+        )
+    log_path = _update_log()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        handle = log_path.open("ab")
+        process = subprocess.Popen(
+            ["bash", str(script)],
+            cwd=str(WORKDIR),
+            stdin=subprocess.DEVNULL,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return jsonify({"status": "error", "message": f"无法启动更新：{exc}"})
+    finally:
+        try:
+            handle.close()
+        except Exception:  # noqa: BLE001 - 句柄可能未创建
+            pass
+    _update_pidfile().write_text(str(process.pid), encoding="utf-8")
+    return jsonify(
+        {
+            "status": "started",
+            "message": f"已开始更新到 v{latest}（当前 v{APP_VERSION}），服务将在完成后自动重启",
+            "latest": latest,
+            "source": source,
+            "pid": process.pid,
+        }
+    )
+
+
+@app.route("/about/update/status", methods=["GET"])
+def about_update_status():
+    lines: list[str] = []
+    try:
+        text = _update_log().read_text(encoding="utf-8", errors="replace")
+        lines = [line for line in text.splitlines() if line.strip()][-60:]
+    except OSError:
+        pass
+    running = _update_running()
+    return jsonify(
+        {
+            "running": bool(running),
+            "pid": running,
+            "version": APP_VERSION,
+            "lines": lines,
+        }
+    )
+
+
 def main() -> None:
     import argparse
     import webbrowser

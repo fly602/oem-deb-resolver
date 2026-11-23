@@ -41,7 +41,12 @@
     也可以通过环境变量 <code>OEM_UPDATE_URL</code> 指定版本文件地址。
   </p>
   <button type="button" class="primary" id="checkUpdateBtn">检查更新</button>
+  <button type="button" class="btn" id="applyUpdateBtn" style="display:none">立即更新</button>
   <div id="updateResult" style="margin-top:14px"></div>
+  <pre id="updateLog" class="repos" style="display:none; max-height:260px; overflow:auto"></pre>
+  {% if not is_local %}
+  <p class="hint">「立即更新」只允许在本机触发（会拉取代码、装依赖并重启服务）。</p>
+  {% endif %}
 </div>
 
 <div class="panel">
@@ -80,8 +85,69 @@
     }
 
     var button = document.getElementById('checkUpdateBtn');
+    var applyButton = document.getElementById('applyUpdateBtn');
     var box = document.getElementById('updateResult');
+    var logBox = document.getElementById('updateLog');
     var url = "{{ url_for('about_check_update') }}";
+    var applyUrl = "{{ url_for('about_update') }}";
+    var statusUrl = "{{ url_for('about_update_status') }}";
+    var pollTimer = null;
+
+    function showLog(lines) {
+      if (!lines || !lines.length) return;
+      logBox.style.display = 'block';
+      logBox.textContent = lines.join('\n');
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    async function pollStatus() {
+      try {
+        var response = await fetch(statusUrl, { cache: 'no-store' });
+        var data = await response.json();
+        showLog(data.lines);
+        if (!data.running) {
+          clearInterval(pollTimer);
+          box.className = 'box ok';
+          box.textContent = '更新流程结束，当前版本 v' + data.version + '。';
+          var link = document.createElement('a');
+          link.href = '{{ url_for("about") }}';
+          link.textContent = ' 刷新版本信息';
+          box.appendChild(link);
+          applyButton.disabled = false;
+        }
+      } catch (error) {
+        // 服务重启期间请求会失败，继续轮询
+      }
+    }
+
+    applyButton.addEventListener('click', async function () {
+      if (!confirm('将拉取 GitHub 上的最新代码、安装依赖并重启服务，期间页面短暂不可用。继续？')) return;
+      applyButton.disabled = true;
+      box.className = 'hint';
+      box.textContent = '正在启动更新…';
+      logBox.style.display = 'block';
+      logBox.textContent = '';
+      try {
+        var response = await fetch(applyUrl, { method: 'POST', headers: { 'Accept': 'application/json' } });
+        var data = await response.json();
+        if (data.status === 'error') {
+          box.className = 'box error';
+          box.textContent = data.message;
+          applyButton.disabled = false;
+          return;
+        }
+        box.className = 'box ok';
+        box.textContent = data.message;
+        if (data.status === 'latest') { applyButton.disabled = false; return; }
+        clearInterval(pollTimer);
+        pollTimer = setInterval(pollStatus, 1500);
+        pollStatus();
+      } catch (error) {
+        box.className = 'box error';
+        box.textContent = '触发更新失败：' + error.message;
+        applyButton.disabled = false;
+      }
+    });
 
     button.addEventListener('click', async function () {
       button.disabled = true;
@@ -107,6 +173,10 @@
             link.rel = 'noopener';
             link.textContent = ' 打开项目主页';
             box.appendChild(link);
+            applyButton.style.display = 'inline-block';
+            applyButton.disabled = false;
+          } else {
+            applyButton.style.display = 'none';
           }
         }
       } catch (error) {
