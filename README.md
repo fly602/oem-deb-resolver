@@ -138,7 +138,7 @@ curl -fsSL https://github.com/fly602/oem-deb-resolver/raw/main/install.sh \
 - **版本元信息**：版本可选填「描述」（列表中以省略号截断，鼠标悬停显示全文）与「管理员」；每个仓库组可选填「描述」与「维护人员」；管理员、组描述、维护人员只在版本详情页与配置文件中出现，不在列表显示；导入导出与打包 zip 会一并保留这些字段
 - **关于**：首页“关于”显示当前版本、Python/Flask/验签工具环境，并提供“检查更新”；默认读取项目 GitHub 的 `VERSION` 文件，也可用环境变量 `OEM_UPDATE_URL` 指定版本文件地址；GitHub 地址为 `https://github.com/fly602/oem-deb-resolver`
 - **更新注记**：版本或仓库组可配置「更新注记来源」（GitLab 报告仓库地址/分支/目录/过滤仓库），详情页每个组或仓库显示「更新注记」按钮 → 独立页面按最新一期渲染注记与变更报告，期次用下拉切换；「导出压缩包」按全部期次导出原始文件与 `info.txt`。信息取不到时按钮置灰并给出原因。优先级：仓库组填了任意注记字段则整组统一用组配置；组为空则逐仓库按「仓库 → 版本 → `config/notes.local.json`」逐级继承。令牌用环境变量 `OEM_GITLAB_TOKEN` 或 `config/notes.local.json` 的 `token` 字段（该文件不入库）；`url` 也可以填本地已克隆目录，便于内网镜像
-- **手动更新**：检查到新版本后会出现「立即更新」（仅本机访问时可用），确认后由 `self-update.sh` 执行 `git fetch` + `git reset --hard origin/main` + 安装依赖 + 重启服务，页面实时显示日志；本实例的 `config/versions.json` 会先备份到 `cache/versions.json.bak` 再恢复。不会自动更新，必须人工点击；也可在部署目录直接执行 `./self-update.sh`
+- **手动更新**：检查到新版本后会出现「立即更新」（仅本机访问时可用），确认后由 `self-update.sh` 执行 `git fetch` + `git reset --hard origin/main` + 安装依赖 + 重启服务，页面实时显示日志；本实例的 `config/versions.json` 会先备份到 `cache/versions.json.bak` 再恢复。不会自动更新，必须人工点击；也可在部署目录直接执行 `./self-update.sh`。拉取/依赖安装带超时（120s/180s），失败时服务保持原状并在页面显示失败日志
 - **本地部署**：远程访问时“关于”页显示“本地部署”，可从当前环境下载部署包（含代码、启动脚本和当前 `config/versions.json`，不含 `.venv/cache`）；本机访问或检测到本机已部署时按钮自动隐藏；部署页显示部署源健康状态
 - **配置导入**：首页“导入配置”可上传或粘贴 `versions.json`；始终按整合处理——同 id 保留现有基线与架构，只追加缺失的仓库组和仓库；导入文件中没有的版本不受影响；打包 zip 根目录也会附带可直接导入的 `versions.json`
 - **有效性检查**：版本页可单独检查基线清单或全部补丁仓库；结果直接显示在页面下方（架构 + 包数量），不跳转；仓库 0 个包视为正常，基线 0 个包视为异常

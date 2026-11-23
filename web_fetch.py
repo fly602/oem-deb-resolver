@@ -2668,9 +2668,19 @@ def about_update_status():
     except OSError:
         pass
     running = _update_running()
+    state = "idle"
+    if running:
+        state = "running"
+    else:
+        joined = "\n".join(lines)
+        if "更新完成" in joined:
+            state = "done"
+        elif "更新失败" in joined or "错误：" in joined:
+            state = "failed"
     return jsonify(
         {
             "running": bool(running),
+            "state": state,
             "pid": running,
             "version": APP_VERSION,
             "lines": lines,

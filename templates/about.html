@@ -107,8 +107,8 @@
         showLog(data.lines);
         if (!data.running) {
           clearInterval(pollTimer);
-          box.className = 'box ok';
-          box.textContent = '更新流程结束，当前版本 v' + data.version + '。';
+          box.className = data.state === 'failed' ? 'box error' : 'box ok';
+          box.textContent = (data.state === 'failed' ? '更新未完成，请查看下方日志。当前版本 v' : '更新流程结束，当前版本 v') + data.version + '。';
           var link = document.createElement('a');
           link.href = '{{ url_for("about") }}';
           link.textContent = ' 刷新版本信息';

@@ -25,13 +25,13 @@ if [[ -f config/versions.json ]]; then
 fi
 
 log "== 拉取 origin/$BRANCH"
-if ! git fetch --depth=1 origin "$BRANCH" >>"$LOG" 2>&1; then
-    fail "git fetch 失败（检查网络或仓库权限）"
+if ! timeout 120 git fetch --depth=1 origin "$BRANCH" >>"$LOG" 2>&1; then
+    fail "git fetch 失败或超时（检查网络或仓库权限）"
 fi
 
 OLD_VERSION="$(cat VERSION 2>/dev/null || echo '?')"
 OLD_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo '?')"
-if ! git reset --hard "origin/$BRANCH" >>"$LOG" 2>&1; then
+if ! timeout 60 git reset --hard "origin/$BRANCH" >>"$LOG" 2>&1; then
     fail "git reset --hard origin/$BRANCH 失败"
 fi
 NEW_VERSION="$(cat VERSION 2>/dev/null || echo '?')"
@@ -51,7 +51,7 @@ else
     PIP=python3
 fi
 env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy \
-    "$PIP" -m pip install -q --timeout 30 --retries 2 -r requirements.txt >>"$LOG" 2>&1 \
+    timeout 180 "$PIP" -m pip install -q --timeout 30 --retries 2 -r requirements.txt >>"$LOG" 2>&1 \
     || log "警告：依赖安装失败，继续重启（可稍后手工执行 pip install -r requirements.txt）"
 
 log "== 重启服务"
