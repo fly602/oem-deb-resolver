@@ -21,6 +21,11 @@
     <p>{{ version.name }} · {{ scope }}</p>
   </div>
   <div class="actions" style="margin-top:0">
+    {% if config.url %}
+    <form method="post" action="{{ url_for('version_notes_refresh', version_id=version.id, group=args.group_index) }}{% if args.repo_index is not none %}?repo={{ args.repo_index }}{% endif %}" style="margin:0">
+      <button type="submit" class="btn">同步注记仓库</button>
+    </form>
+    {% endif %}
     {% if data %}
     <a class="btn primary" href="{{ export_url }}">导出压缩包</a>
     {% endif %}
@@ -42,6 +47,20 @@
     {% if config.sources %} · 过滤仓库 <code>{{ config.sources|join(', ') }}</code>{% endif %}
   </p>
 </div>
+{% endif %}
+
+{% if sync_message %}
+<div class="box {{ 'error' if '失败' in sync_message else 'ok' }}"><p style="margin:0">注记仓库{{ sync_message }}</p></div>
+{% endif %}
+
+{% if mirror %}
+<p class="hint" style="margin:-6px 0 14px">
+  本地镜像 <code>{{ mirror.path }}</code>
+  {% if mirror.commit %}· 版本 <code>{{ mirror.commit }}</code>{% endif %}
+  {% if mirror.updated_at %}· 同步于 {{ mirror.updated_at }}{% endif %}
+  {% if not mirror.exists %}· 尚未克隆（检查更新或点「同步注记仓库」会拉取）{% endif %}
+  {% if mirror.last_error %}<span style="color:var(--error)">· {{ mirror.last_error }}</span>{% endif %}
+</p>
 {% endif %}
 
 {% if data %}

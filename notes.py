@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import html
 import io
 import json
@@ -26,7 +25,6 @@ import zipfile
 from pathlib import Path
 
 PERIOD_RE = re.compile(r"^\d{8}_\d{6}$")
-CACHE_TTL = 300.0
 GIT_TIMEOUT = 120
 
 NOTE_FIELDS = ("url", "ref", "dir", "sources")
@@ -78,7 +76,7 @@ def is_configured(config: dict) -> bool:
 # ─── 仓库定位（clone / 本地目录） ──────────────────────────────────────────────
 
 
-def _local_dir(url: str) -> Path | None:
+def local_dir(url: str) -> Path | None:
     candidate = url[7:] if url.startswith("file://") else url
     if candidate.startswith(("http://", "https://", "git@", "ssh://")):
         return None
@@ -86,18 +84,28 @@ def _local_dir(url: str) -> Path | None:
     return path if path.is_dir() else None
 
 
-def _clone_url(url: str, token: str) -> str:
-    if not token:
-        return url
-    if not url.startswith("https://"):
-        return url
-    rest = url[len("https://"):]
-    if "@" in rest.split("/", 1)[0]:
-        return url
-    return f"https://oauth2:{token}@{rest}"
+def _git_env(token: str) -> dict:
+    env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "/bin/true",
+    }
+    if token:
+        # 用 credential helper 传令牌，避免写进 .git/config 或进程命令行
+        env.update(
+            {
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "credential.helper",
+                "GIT_CONFIG_VALUE_0": (
+                    "!f() { echo username=oauth2; echo password=$OEM_GITLAB_TOKEN; }; f"
+                ),
+                "OEM_GITLAB_TOKEN": token,
+            }
+        )
+    return env
 
 
-def _run_git(args: list[str], cwd: Path | None = None) -> None:
+def _run_git(args: list[str], token: str = "", cwd: Path | None = None) -> None:
     try:
         result = subprocess.run(
             ["git", *args],
@@ -106,12 +114,12 @@ def _run_git(args: list[str], cwd: Path | None = None) -> None:
             stderr=subprocess.PIPE,
             timeout=GIT_TIMEOUT,
             check=False,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            env=_git_env(token),
         )
     except FileNotFoundError as exc:
         raise NotesError("系统缺少 git，无法拉取注记仓库") from exc
     except subprocess.TimeoutExpired as exc:
-        raise NotesError("拉取注记仓库超时（120s）") from exc
+        raise NotesError(f"拉取注记仓库超时（{GIT_TIMEOUT}s）") from exc
     if result.returncode != 0:
         message = result.stderr.decode("utf-8", errors="replace").strip()
         message = re.sub(r"https://[^@\s]+@", "https://", message)
@@ -119,34 +127,115 @@ def _run_git(args: list[str], cwd: Path | None = None) -> None:
         raise NotesError(f"拉取注记仓库失败：{tail}")
 
 
-def _checkout(url: str, ref: str, token: str, cache_root: Path) -> Path:
-    local = _local_dir(url)
+def _mask(url: str) -> str:
+    return re.sub(r"https://[^@\s]+@", "https://", url)
+
+
+def repo_slug(url: str) -> str:
+    """把仓库地址转成本地镜像目录名，例如 crp-update-report。"""
+    path = url.rstrip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    slug = re.split(r"[/:]+", path)[-1] or "notes"
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", slug).strip("-._")
+    return slug or "notes"
+
+
+def mirror_path(url: str, cache_root: Path, override: str = "") -> Path:
+    if override:
+        return Path(override).expanduser()
+    return cache_root / repo_slug(url)
+
+
+def _write_meta(target: Path, **fields) -> None:
+    meta = target.with_name(target.name + ".meta.json")
+    data = {}
+    if meta.is_file():
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+    data.update(fields)
+    data["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        meta.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def read_meta(target: Path) -> dict:
+    meta = target.with_name(target.name + ".meta.json")
+    try:
+        return json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _head_commit(target: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(target), "rev-parse", "--short", "HEAD"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.decode("utf-8", errors="replace").strip()
+
+
+def sync_mirror(
+    url: str,
+    ref: str,
+    token: str,
+    cache_root: Path,
+    override: str = "",
+    timeout: int = 0,
+) -> tuple[Path, str]:
+    """把上游仓库同步到本地镜像目录：没有就克隆，有就 fetch + reset。"""
+    local = local_dir(url)
+    if local is not None:
+        return local, "本地目录"
+    target = mirror_path(url, cache_root, override)
+    if timeout:
+        global GIT_TIMEOUT
+        saved, GIT_TIMEOUT = GIT_TIMEOUT, timeout
+    else:
+        saved = None
+    try:
+        if (target / ".git").is_dir():
+            _run_git(["-C", str(target), "fetch", "--depth=1", "origin", ref or "HEAD"], token)
+            _run_git(["-C", str(target), "reset", "--hard", "FETCH_HEAD"], token)
+            action = "已更新"
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(target, ignore_errors=True)
+            args = ["clone", "--depth=1", "--quiet"]
+            if ref:
+                args += ["--branch", ref]
+            args += [url, str(target)]
+            _run_git(args, token)
+            action = "已克隆"
+    except NotesError:
+        if (target / ".git").is_dir():
+            _write_meta(target, last_error="同步失败，使用本地缓存")
+        raise
+    finally:
+        if saved is not None:
+            GIT_TIMEOUT = saved
+    _write_meta(target, last_error="", commit=_head_commit(target))
+    return target, action
+
+
+def _checkout(url: str, ref: str, token: str, cache_root: Path, override: str = "") -> Path:
+    local = local_dir(url)
     if local is not None:
         return local
-    key = hashlib.sha1(f"{url}|{ref}".encode("utf-8")).hexdigest()[:16]
-    target = cache_root / key
-    meta = cache_root / f"{key}.json"
-    now = time.time()
-    if target.is_dir() and meta.is_file():
-        try:
-            fetched_at = float(json.loads(meta.read_text(encoding="utf-8"))["fetched_at"])
-        except (OSError, ValueError, KeyError):
-            fetched_at = 0.0
-        if now - fetched_at < CACHE_TTL:
-            return target
-        _run_git(["-C", str(target), "fetch", "--depth=1", "origin", ref or "HEAD"])
-        _run_git(["-C", str(target), "reset", "--hard", "FETCH_HEAD"])
-        meta.write_text(json.dumps({"fetched_at": now}), encoding="utf-8")
+    target = mirror_path(url, cache_root, override)
+    if (target / ".git").is_dir():
         return target
-    shutil.rmtree(target, ignore_errors=True)
-    cache_root.mkdir(parents=True, exist_ok=True)
-    clone_url = _clone_url(url, token)
-    args = ["clone", "--depth=1", "--quiet"]
-    if ref:
-        args += ["--branch", ref]
-    args += [clone_url, str(target)]
-    _run_git(args)
-    meta.write_text(json.dumps({"fetched_at": now}), encoding="utf-8")
+    target, _ = sync_mirror(url, ref, token, cache_root, override)
     return target
 
 
@@ -444,8 +533,23 @@ def filter_report(text: str, sources: list[str]) -> str:
 # ─── 供 Web 层使用的入口 ───────────────────────────────────────────────────────
 
 
-def load_bundle(config: dict, cache_root: Path, token: str = "") -> ReportBundle:
+def load_bundle(
+    config: dict,
+    cache_root: Path,
+    token: str = "",
+    override: str = "",
+    refresh: bool = False,
+) -> ReportBundle:
+    """读取注记源；refresh=True 时先把本地镜像同步到上游最新。"""
     if not is_configured(config):
         raise NotesError("未配置更新注记源")
-    root = _checkout(config["url"], config.get("ref", ""), token, cache_root)
+    url = config["url"]
+    ref = config.get("ref", "")
+    if refresh:
+        root, action = sync_mirror(url, ref, token, cache_root, override)
+        if local_dir(url) is not None:
+            action = "本地目录"
+        config = {**config, "synced": action}
+    else:
+        root = _checkout(url, ref, token, cache_root, override)
     return ReportBundle(root, config)

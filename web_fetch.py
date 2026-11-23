@@ -60,7 +60,11 @@ from notes import (
     is_configured as notes_is_configured,
     load_bundle as notes_load_bundle,
     merge_config as notes_merge_config,
+    mirror_path as notes_mirror_path,
     period_label as notes_period_label,
+    read_meta as notes_read_meta,
+    sync_mirror as notes_sync_mirror,
+    local_dir as notes_local_dir,
 )
 
 WORKDIR = Path(__file__).resolve().parent
@@ -319,16 +323,104 @@ def _notes_config(version: dict, group: dict | None = None, repo_index: int | No
     return notes_merge_config(*layers)
 
 
+def _notes_mirror_override() -> str:
+    local = _notes_local()
+    return str(local.get("mirror_dir", "")).strip()
+
+
+def _notes_bundle(config: dict, refresh: bool = False):
+    return notes_load_bundle(
+        config,
+        NOTES_CACHE,
+        _notes_token(),
+        override=_notes_mirror_override(),
+        refresh=refresh,
+    )
+
+
+def _notes_mirror_status(config: dict) -> dict:
+    url = config.get("url", "")
+    if not url or notes_local_dir(url):
+        return {}
+    path = notes_mirror_path(url, NOTES_CACHE, _notes_mirror_override())
+    meta = notes_read_meta(path)
+    return {
+        "path": str(path),
+        "exists": (path / ".git").is_dir(),
+        "commit": meta.get("commit", ""),
+        "updated_at": meta.get("updated_at", ""),
+        "last_error": meta.get("last_error", ""),
+    }
+
+
+def _notes_configs_for_version(version: dict) -> list[dict]:
+    """该版本会用到注记源（按组/仓库规则解析后去重）。"""
+    configs: list[dict] = []
+    seen: set[str] = set()
+
+    def add(config: dict) -> None:
+        if not notes_is_configured(config):
+            return
+        key = json.dumps(config, sort_keys=True, ensure_ascii=False)
+        if key in seen:
+            return
+        seen.add(key)
+        configs.append(config)
+
+    for group in version.get("groups", []):
+        if _notes_has_fields(group.get("notes")):
+            add(_notes_config(version, group))
+            continue
+        for repo_index in range(len(group.get("repos", []))):
+            add(_notes_config(version, group, repo_index))
+    if not configs:
+        add(_notes_config(version))
+    return configs
+
+
+def refresh_notes_mirrors(version: dict, timeout: int = 60) -> list[dict]:
+    """检查更新时调用：把该版本的注记镜像同步到最新，失败只记录不抛。"""
+    results: list[dict] = []
+    for config in _notes_configs_for_version(version):
+        entry = {"url": config.get("url", ""), "ok": True, "message": ""}
+        try:
+            _, action = notes_sync_mirror(
+                config["url"],
+                config.get("ref", ""),
+                _notes_token(),
+                NOTES_CACHE,
+                _notes_mirror_override(),
+                timeout=timeout,
+            )
+            entry["message"] = action
+            _NOTES_STATE_MEMO.clear()
+        except NotesFetchError as exc:
+            entry["ok"] = False
+            entry["message"] = str(exc)
+        results.append(entry)
+    return results
+
+
 def _notes_state(config: dict) -> dict:
     if not notes_is_configured(config):
         return {"available": False, "reason": "未配置更新注记源", "label": "", "latest": ""}
+    url = config.get("url", "")
+    if not notes_local_dir(url):
+        mirror = notes_mirror_path(url, NOTES_CACHE, _notes_mirror_override())
+        if not (mirror / ".git").is_dir():
+            return {
+                "available": False,
+                "reason": "注记仓库尚未同步（点「检查更新」时会自动拉取）",
+                "label": "",
+                "latest": "",
+            }
     key = json.dumps(config, sort_keys=True, ensure_ascii=False)
     now = time.time()
     cached = _NOTES_STATE_MEMO.get(key)
     if cached and now - cached[0] < 300:
         return cached[1]
     try:
-        bundle = notes_load_bundle(config, NOTES_CACHE, _notes_token())
+        bundle = _notes_bundle(config)
         periods = bundle.periods()
         state = {
             "available": True,
@@ -1201,6 +1293,8 @@ def version_notes(version_id: str):
                 else {}
             ),
         ),
+        "mirror": _notes_mirror_status(config),
+        "sync_message": request.args.get("sync", ""),
     }
     if not notes_is_configured(config):
         return (
@@ -1213,11 +1307,46 @@ def version_notes(version_id: str):
             200,
         )
     try:
-        bundle = notes_load_bundle(config, NOTES_CACHE, _notes_token())
+        bundle = _notes_bundle(config, refresh=request.args.get("refresh") == "1")
         data = bundle.load(period or None)
     except NotesFetchError as exc:
         return render_template("notes.html", data=None, error=str(exc), **base), 200
     return render_template("notes.html", data=data, error="", **base)
+
+
+@app.route("/versions/<version_id>/notes/refresh", methods=["POST"])
+def version_notes_refresh(version_id: str):
+    version = _get_version(version_id)
+    _, target = _notes_target(version)
+    config = target["config"]
+    if not notes_is_configured(config):
+        abort(404)
+    try:
+        _, action = notes_sync_mirror(
+            config["url"],
+            config.get("ref", ""),
+            _notes_token(),
+            NOTES_CACHE,
+            _notes_mirror_override(),
+            timeout=120,
+        )
+        message = action
+    except NotesFetchError as exc:
+        message = f"同步失败：{exc}"
+    _NOTES_STATE_MEMO.clear()
+    return redirect(
+        url_for(
+            "version_notes",
+            version_id=version_id,
+            group=target["group_index"],
+            sync=message,
+            **(
+                {"repo": target["repo_index"]}
+                if target["repo_index"] is not None
+                else {}
+            ),
+        )
+    )
 
 
 @app.route("/versions/<version_id>/notes/export", methods=["GET"])
@@ -1228,7 +1357,7 @@ def version_notes_export(version_id: str):
     if not notes_is_configured(config):
         abort(404)
     try:
-        bundle = notes_load_bundle(config, NOTES_CACHE, _notes_token())
+        bundle = _notes_bundle(config)
         payload = bundle.export_zip(version["name"])
     except (NotesFetchError, OSError) as exc:
         abort(404, description=str(exc))
@@ -1627,6 +1756,10 @@ def version_import():
 def version_check(version_id: str):
     _ensure_dirs()
     version = _get_version(version_id)
+    try:
+        refresh_notes_mirrors(version, timeout=60)
+    except Exception:  # noqa: BLE001 - 注记同步失败不影响检查
+        pass
     filters = _parse_filters(request.form.get("filters", ""))
     manual_scope = request.form.get("scope") == "selected"
     selected_repos: set[tuple[int, int]] = set()
