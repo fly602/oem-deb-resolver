@@ -22,6 +22,7 @@
   <thead>
     <tr>
       <th>版本</th>
+      <th>描述</th>
       <th>架构</th>
       <th class="num">仓库组</th>
       <th>仓库</th>
@@ -33,6 +34,7 @@
     {% for version in versions %}
     <tr>
       <td><a href="{{ url_for('version_detail', version_id=version.id) }}"><strong>{{ version.name }}</strong></a></td>
+      <td class="muted"><div class="desc-cell" title="{{ version.description or '' }}">{{ version.description or '—' }}</div></td>
       <td>{{ version.display_arch|default(version.arch) }}</td>
       <td class="num">{{ version.groups|length }}</td>
       <td class="muted">

@@ -14,8 +14,9 @@ env/
 .idea/
 .vscode/
 
-# Local config (user-specific, do not commit)
-config/
+# Default version config ships with the repo; keep runtime leftovers out
+config/*
+!config/versions.json
 
 # Cache
 cache/

@@ -121,6 +121,13 @@
     .group-head { display: flex; gap: 10px; margin-bottom: 8px; }
     .group-head input { flex: 1; }
     .group-head button { flex: none; }
+    .group-meta { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; align-items: flex-start; }
+    .group-meta input { flex: 1 1 200px; }
+    .group-meta textarea { flex: 2 1 320px; min-height: 56px; }
+    textarea.prose { font-family: inherit; font-size: 14.5px; line-height: 1.6; }
+    .desc-cell { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .group-note { color: var(--muted); font-size: 12.5px; }
+    .group-note .k { color: var(--text); font-weight: 600; }
     .inline-form { display: inline; margin: 0; }
     {% block style %}{% endblock %}
   </style>

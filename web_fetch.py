@@ -288,34 +288,56 @@ def _version_form_data(version: dict | None) -> dict:
     if version is None:
         return {
             "name": "",
+            "description": "",
+            "admin": "",
             "base_list": "",
             "arch": "amd64",
-            "groups": [{"name": "", "repos": ""}],
+            "groups": [_empty_group_form()],
         }
     return {
         "name": version["name"],
+        "description": version.get("description", ""),
+        "admin": version.get("admin", ""),
         "base_list": version["base_list"],
         "arch": version.get("arch", "amd64"),
         "groups": [
-            {"name": group["name"], "repos": "\n".join(group["repos"])}
+            {
+                "name": group["name"],
+                "description": group.get("description", ""),
+                "maintainer": group.get("maintainer", ""),
+                "repos": "\n".join(group["repos"]),
+            }
             for group in version.get("groups", [])
         ]
-        or [{"name": "", "repos": ""}],
+        or [_empty_group_form()],
     }
 
 
+def _empty_group_form() -> dict:
+    return {"name": "", "description": "", "maintainer": "", "repos": ""}
+
+
 def _submitted_form_data(form) -> dict:
+    names = form.getlist("group_name")
+    descriptions = form.getlist("group_description")
+    maintainers = form.getlist("group_maintainer")
+    repos = form.getlist("group_repos")
     groups = [
-        {"name": group_name, "repos": repo_text}
-        for group_name, repo_text in zip(
-            form.getlist("group_name"), form.getlist("group_repos")
-        )
+        {
+            "name": name,
+            "description": descriptions[index] if index < len(descriptions) else "",
+            "maintainer": maintainers[index] if index < len(maintainers) else "",
+            "repos": repos[index] if index < len(repos) else "",
+        }
+        for index, name in enumerate(names)
     ]
     return {
         "name": form.get("name", ""),
+        "description": form.get("description", ""),
+        "admin": form.get("admin", ""),
         "base_list": form.get("base_list", ""),
         "arch": form.get("architecture", "amd64"),
-        "groups": groups or [{"name": "", "repos": ""}],
+        "groups": groups or [_empty_group_form()],
     }
 
 
@@ -334,11 +356,23 @@ def _version_from_form(form) -> dict:
 
     group_names = form.getlist("group_name")
     group_repos = form.getlist("group_repos")
+    group_descriptions = form.getlist("group_description")
+    group_maintainers = form.getlist("group_maintainer")
     groups: list[dict] = []
     for index, (group_name, repo_text) in enumerate(
         zip(group_names, group_repos), 1
     ):
         group_name = group_name.strip()
+        group_description = (
+            group_descriptions[index - 1].strip()
+            if index - 1 < len(group_descriptions)
+            else ""
+        )[:500]
+        group_maintainer = (
+            group_maintainers[index - 1].strip()
+            if index - 1 < len(group_maintainers)
+            else ""
+        )[:200]
         repos = [
             line.strip()
             for line in repo_text.splitlines()
@@ -352,13 +386,22 @@ def _version_from_form(form) -> dict:
             raise ValueError(f"仓库组「{group_name}」至少需要一个补丁仓库")
         for repo in repos:
             parse_repo_spec(repo)  # 只做格式校验
-        groups.append({"name": group_name, "repos": repos})
+        groups.append(
+            {
+                "name": group_name,
+                "description": group_description,
+                "maintainer": group_maintainer,
+                "repos": repos,
+            }
+        )
 
     if not groups:
         raise ValueError("请至少添加一个补丁仓库组")
     detected = detect_arch_from_baseline(base_list)
     return {
         "name": name,
+        "description": form.get("description", "").strip()[:500],
+        "admin": form.get("admin", "").strip()[:200],
         "base_list": base_list,
         "arch": detected or arch,
         "groups": groups,
@@ -544,6 +587,8 @@ def version_create():
     version = {
         "id": _version_id(data["name"], versions),
         "name": data["name"],
+        "description": data.get("description", ""),
+        "admin": data.get("admin", ""),
         "base_list": data["base_list"],
         "arch": data["arch"],
         "groups": data["groups"],
@@ -636,7 +681,13 @@ def version_detail(version_id: str):
                 }
             )
         repo_groups.append(
-            {"index": group_index, "name": group["name"], "repos": repos}
+            {
+                "index": group_index,
+                "name": group["name"],
+                "description": group.get("description", ""),
+                "maintainer": group.get("maintainer", ""),
+                "repos": repos,
+            }
         )
     baseline_rows = []
     for index, arch in enumerate(_arch_list(effective_arch(version))):
@@ -1000,7 +1051,7 @@ def version_validate_repos(version_id: str):
 def _merge_version_config(existing: dict, imported: dict) -> dict:
     """同名版本合并：保留现有配置，只追加缺失的仓库组和仓库。"""
     merged = dict(existing)
-    for key in ("name", "base_list", "arch", "created_at"):
+    for key in ("name", "description", "admin", "base_list", "arch", "created_at"):
         if not merged.get(key) and imported.get(key):
             merged[key] = imported[key]
 
@@ -1009,6 +1060,8 @@ def _merge_version_config(existing: dict, imported: dict) -> dict:
     for group in existing.get("groups", []):
         copy = {
             "name": group["name"],
+            "description": group.get("description", ""),
+            "maintainer": group.get("maintainer", ""),
             "repos": list(dict.fromkeys(group.get("repos", []))),
         }
         groups.append(copy)
@@ -1016,9 +1069,18 @@ def _merge_version_config(existing: dict, imported: dict) -> dict:
     for group in imported.get("groups", []):
         target = group_index.get(group["name"])
         if target is None:
-            target = {"name": group["name"], "repos": []}
+            target = {
+                "name": group["name"],
+                "description": group.get("description", ""),
+                "maintainer": group.get("maintainer", ""),
+                "repos": [],
+            }
             groups.append(target)
             group_index[group["name"]] = target
+        else:
+            for key in ("description", "maintainer"):
+                if not target.get(key) and group.get(key):
+                    target[key] = group[key]
         for repo in group["repos"]:
             if repo not in target["repos"]:
                 target["repos"].append(repo)
@@ -1074,7 +1136,14 @@ def _parse_imported_versions(payload) -> list[dict]:
                 raise ValueError(f"版本 {name} 第 {group_index} 个仓库组缺少名称或仓库")
             for repo in repos:
                 parse_repo_spec(repo)
-            groups.append({"name": group_name, "repos": repos})
+            groups.append(
+                {
+                    "name": group_name,
+                    "description": str(group.get("description", "")).strip()[:500],
+                    "maintainer": str(group.get("maintainer", "")).strip()[:200],
+                    "repos": repos,
+                }
+            )
 
         version_id = re.sub(
             r"[^A-Za-z0-9._-]+", "-", str(raw.get("id", "")).strip()
@@ -1085,6 +1154,8 @@ def _parse_imported_versions(payload) -> list[dict]:
             {
                 "id": version_id,
                 "name": name,
+                "description": str(raw.get("description", "")).strip()[:500],
+                "admin": str(raw.get("admin", "")).strip()[:200],
                 "base_list": base_list,
                 "arch": arch,
                 "groups": groups,

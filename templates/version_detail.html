@@ -23,6 +23,7 @@
 <header class="page">
   <div>
     <h1>{{ version.name }}</h1>
+    {% if version.description %}<p>{{ version.description }}</p>{% endif %}
     <p>版本配置 · {{ display_arch }} 架构{% if detected_arch %}（由基线文件名自动识别）{% endif %} · {{ version.groups|length }} 个仓库组 / {{ repo_count }} 个仓库</p>
   </div>
   <div class="actions" style="margin-top:0">
@@ -39,6 +40,7 @@
   <span class="chip">架构 <strong>{{ display_arch }}</strong>{% if detected_arch %} <span class="muted">自动识别</span>{% endif %}</span>
   <span class="chip">仓库组 <strong>{{ version.groups|length }}</strong></span>
   <span class="chip">仓库 <strong>{{ repo_count }}</strong></span>
+  {% if version.admin %}<span class="chip">管理员 <strong>{{ version.admin }}</strong></span>{% endif %}
   {% if version.created_at %}<span class="chip">创建于 <strong>{{ version.created_at }}</strong></span>{% endif %}
 </div>
 
@@ -86,6 +88,8 @@
       <input type="checkbox" class="group-check" checked title="勾选/取消本组全部仓库" aria-label="选择仓库组 {{ group.name }}">
       <strong>{{ group.name }}</strong>
       <span class="chip">{{ group.repos|length }} 个仓库</span>
+      {% if group.description %}<span class="group-note" title="{{ group.description }}">描述 <span class="k">{{ group.description }}</span></span>{% endif %}
+      {% if group.maintainer %}<span class="group-note">维护 <span class="k">{{ group.maintainer }}</span></span>{% endif %}
     </div>
     <table class="config-table">
       <thead>

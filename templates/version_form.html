@@ -35,6 +35,20 @@
   </div>
 
   <div class="field">
+    <label class="title" for="description">描述</label>
+    <textarea id="description" name="description" class="prose" rows="3" maxlength="500"
+              placeholder="如 2500 更新2 第一轮补丁，供版本列表快速辨认（可留空）">{{ form.description or '' }}</textarea>
+    <p class="hint">可选，最多 500 字；显示在版本列表中，过长时省略、悬停显示全文。</p>
+  </div>
+
+  <div class="field">
+    <label class="title" for="admin">管理员</label>
+    <input type="text" id="admin" name="admin" maxlength="200" value="{{ form.admin or '' }}"
+           placeholder="如 张三 / fuleyi">
+    <p class="hint">可选；不在版本列表显示，只在详情页与配置中保存。</p>
+  </div>
+
+  <div class="field">
     <label class="title" for="base_list">基线仓库/清单地址</label>
     <input type="text" id="base_list" name="base_list" required value="{{ form.base_list }}"
            placeholder="https://cdimage.uniontech.com/.../20260803-stable/ 或 .../report/iso-package-list/xxxx.txt">
@@ -50,6 +64,12 @@
         <div class="group-head">
           <input type="text" name="group_name" value="{{ group.name }}" placeholder="组名，如 dde / 系统 / 窗管">
           <button type="button" class="btn danger remove-group">删除</button>
+        </div>
+        <div class="group-meta">
+          <textarea name="group_description" class="prose" rows="2" maxlength="500"
+                    placeholder="组描述（可选，不在列表显示）">{{ group.description or '' }}</textarea>
+          <input type="text" name="group_maintainer" maxlength="200" value="{{ group.maintainer or '' }}"
+                 placeholder="维护人员（可选，不在列表显示）">
         </div>
         <textarea name="group_repos" placeholder="deb [trusted=yes] https://aptly.example.com/pkg/xxx unstable main">{{ group.repos }}</textarea>
       </div>
@@ -118,6 +138,10 @@
         '<div class="group-head">' +
         '<input type="text" name="group_name" placeholder="组名，如 dde / 系统 / 窗管">' +
         '<button type="button" class="btn danger remove-group">删除</button>' +
+        '</div>' +
+        '<div class="group-meta">' +
+        '<textarea name="group_description" class="prose" rows="2" maxlength="500" placeholder="组描述（可选，不在列表显示）"></textarea>' +
+        '<input type="text" name="group_maintainer" maxlength="200" placeholder="维护人员（可选，不在列表显示）">' +
         '</div>' +
         '<textarea name="group_repos" placeholder="deb [trusted=yes] https://aptly.example.com/pkg/xxx unstable main"></textarea>';
       container.appendChild(row);
