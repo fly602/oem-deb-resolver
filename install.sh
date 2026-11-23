@@ -50,7 +50,7 @@ fi
 
 echo "==> 赋予脚本可执行权限..."
 chmod +x oem_deb_fetch.py web_fetch.py run-fetch-web.sh \
-    oem-launcher.sh install-desktop.sh install.sh
+    oem-launcher.sh install-desktop.sh self-update.sh install.sh
 
 if [ "$INSTALL_DESKTOP" != "0" ] \
     && { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
